@@ -440,15 +440,41 @@ def _find_existing_source(raw: str, data_dir: Path, project_id: str = "") -> tup
 
 
 def _copy_into_bundle(source: Path, bundle_root: Path, data_dir: Path) -> str:
-    # ``strict=False`` keeps this safe if a parent disappears between preflight
-    # and copy; the caller still verifies that source is a real file.
+    """Copy one referenced asset to a deliberately short bundle path.
+
+    Published bundles may live under a long Windows path (Desktop/company/project/
+    web_published/...). Preserving the full WIP tree can easily exceed the classic
+    Windows path limit and surface as WinError 3 even when the source file exists.
+
+    The database only needs a stable relative path, not the original directory
+    hierarchy. Assets are therefore stored under ``data/f/<kind>/<hash>.<ext>``.
+    The original filename remains in SQLite/manifest metadata elsewhere, while the
+    physical bundle path stays short and portable.
+    """
     source = source.resolve(strict=False)
+    suffix = source.suffix.lower()
+
+    # Keep a tiny category purely for readability; never preserve the long source
+    # directory hierarchy inside a Published package.
+    norm_parts = [part.lower() for part in source.parts]
+    if "photos" in norm_parts:
+        kind = "photo"
+    elif "bim" in norm_parts:
+        kind = "bim"
+    elif "excel" in norm_parts or suffix in {".xlsx", ".xlsm", ".xls"}:
+        kind = "excel"
+    elif "assets" in norm_parts or "project_assets" in norm_parts:
+        kind = "logo"
+    else:
+        kind = "file"
+
     try:
-        rel_under_data = source.relative_to(data_dir.resolve())
-        rel = Path("data") / rel_under_data
-    except Exception:
-        suffix = source.suffix.lower()
-        rel = Path("data") / "external" / f"{hashlib.sha1(str(source).encode('utf-8')).hexdigest()[:12]}_{_safe_name(source.stem, 'file')}{suffix}"
+        st = source.stat()
+        identity = f"{source}|{st.st_size}|{st.st_mtime_ns}"
+    except OSError:
+        identity = str(source)
+    token = hashlib.sha1(identity.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    rel = Path("data") / "f" / kind / f"{token}{suffix}"
     dest = bundle_root / rel
     dest.parent.mkdir(parents=True, exist_ok=True)
     if source.exists() and source.is_file():
@@ -533,6 +559,47 @@ def _portable_paths_and_copy_assets(bundle_db: Path, bundle_root: Path, data_dir
             pass
     return list(copied.values()), sorted(set(missing)), list(dict.fromkeys(warnings))
 
+
+
+def _copy_project_storage_snapshot(bundle_root: Path, data_dir: Path, project_id: str, project_code: str, project_name: str) -> list[str]:
+    """Legacy compatibility hook.
+
+    Older builds copied the *entire* isolated project directory into every Published
+    package. On Windows that produced very deep destination paths and caused
+    WinError 3/206 for perfectly valid files. The actual web dashboard only needs
+    the pruned project database plus files referenced by that database; those files
+    are copied by :func:`_portable_paths_and_copy_assets` to short paths.
+
+    Keep this function as a no-op so existing publish flow/call sites remain stable.
+    """
+    return []
+
+
+def _verify_bundle_references(bundle_db: Path, bundle_root: Path) -> list[str]:
+    """Return non-empty DB file references that are not real files in bundle."""
+    missing: list[str] = []
+    with _connect(bundle_db) as conn:
+        for table, cols in PATH_COLUMNS.items():
+            if not _table_exists(conn, table):
+                continue
+            table_cols = _table_columns(conn, table)
+            for col in cols:
+                if col not in table_cols:
+                    continue
+                rows = conn.execute(f'SELECT id,"{col}" FROM "{table}"').fetchall()
+                for row in rows:
+                    raw = str(row[col] or "").strip()
+                    if not raw:
+                        continue
+                    pp = Path(raw)
+                    candidate = pp if pp.is_absolute() else Path(bundle_root) / pp
+                    try:
+                        ok = candidate.exists() and candidate.is_file()
+                    except OSError:
+                        ok = False
+                    if not ok:
+                        missing.append(f"{table}/{row['id']}/{col}: {raw}")
+    return missing
 
 def _project_dir(publish_root: Path, project_id: str, project_code: str) -> Path:
     root = publish_root / "projects"
@@ -635,8 +702,20 @@ def publish_project(source_db: Path, data_dir: Path, project_id: str, publish_ro
         _backup_sqlite(source_db, bundle_db)
         _prune_db_to_project(bundle_db, project_id)
 
+        stage = "menyalin folder proyek WIP"
+        _copy_project_storage_snapshot(
+            version_dir, data_dir, project_id,
+            str(summary.get("project_code") or ""),
+            str(summary.get("project_name") or ""),
+        )
+
         stage = "menyalin Excel, foto, BIM, dan logo"
         files, missing, asset_warnings = _portable_paths_and_copy_assets(bundle_db, version_dir, data_dir)
+
+        stage = "memvalidasi kelengkapan paket"
+        bundle_missing = _verify_bundle_references(bundle_db, version_dir)
+        if bundle_missing:
+            asset_warnings.extend([f"Referensi paket belum valid: {item}" for item in bundle_missing])
 
         generated_at = _now()
         manifest: dict[str, Any] = {

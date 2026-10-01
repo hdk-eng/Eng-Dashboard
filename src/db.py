@@ -1669,10 +1669,21 @@ def delete_source_file_completely(source_file_id: str) -> dict[str, Any]:
         conn.execute("DELETE FROM source_files WHERE id=?", (source_file_id,))
         _audit(conn, project_id, None, "DELETE_SOURCE_FILE_ALL", f"{filename}; datasets={len(dataset_tables)}; snapshots={len(snapshot_tables)}")
 
+    def _physical_path(raw: str) -> Path:
+        p = Path(str(raw or ""))
+        if p.is_absolute():
+            return p
+        norm = str(p).replace("\\", "/")
+        if norm.startswith("data/"):
+            return DB_PATH.parent.parent / p
+        return DB_PATH.parent / p
+
     removed_files = 0
+    resolved_paths: list[Path] = []
     for raw in physical_paths:
         try:
-            fp = Path(raw)
+            fp = _physical_path(raw)
+            resolved_paths.append(fp)
             if fp.exists() and fp.is_file():
                 fp.unlink()
                 removed_files += 1
@@ -1680,8 +1691,8 @@ def delete_source_file_completely(source_file_id: str) -> dict[str, Any]:
             pass
     # Clean now-empty archive directories up to the source-file folder only.
     try:
-        if physical_paths:
-            parent = Path(next(iter(physical_paths))).parent
+        if resolved_paths:
+            parent = resolved_paths[0].parent
             if parent.exists() and not any(parent.iterdir()):
                 parent.rmdir()
     except OSError:

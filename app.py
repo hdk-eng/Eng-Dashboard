@@ -36,15 +36,15 @@ from src.visuals import (
 )
 from src.renderers import render_payload, render_executive, render_engineering_dashboard, render_lookahead
 from src.assets import normalize_logo_bytes, normalized_logo_data_uri
+from src import publish, storage
 
 APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = APP_DIR / "data"
-PHOTO_DIR = DATA_DIR / "photos"
-PHOTO_DIR.mkdir(parents=True, exist_ok=True)
-SOURCE_ARCHIVE_DIR = DATA_DIR / "uploads" / "excel"
-SOURCE_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-PROJECT_ASSET_DIR = DATA_DIR / "project_assets"
-PROJECT_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+# Normal lokal: DB berada di <app>/data. Web Preview: LOCAL_DB_PATH menunjuk ke
+# <app>/data/web_preview/project_hub.db, sehingga semua asset harus dibaca dari
+# folder yang sama dengan database aktif, bukan selalu dari <app>/data.
+DATA_DIR = Path(os.getenv("HDK_DATA_DIR", str(db.DB_PATH.parent))).resolve()
+PROJECTS_DIR = DATA_DIR / "projects"
+PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 LOCAL_ADMIN_PIN_FILE = DATA_DIR / ".local_admin_pin"
 
 SHEET_FUNCTIONS = [
@@ -77,6 +77,21 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 st.markdown(BENTO_CSS, unsafe_allow_html=True)
+
+# Optional server-side auto-sync. This is intended for a self-hosted web server
+# where the Published folder is mounted/synced (for example via Google Drive/rclone).
+# Streamlit Community Cloud cannot mount a local Google Drive Desktop folder directly.
+if str(os.getenv("HDK_WEB_PUBLISHED_ONLY", "0") or "0").strip().lower() in {"1", "true", "yes", "on"} \
+   and str(os.getenv("HDK_AUTO_SYNC_PUBLISHED", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}:
+    _pub_root_env = str(os.getenv("HDK_PUBLISH_ROOT", "") or "").strip()
+    _target_db_env = str(os.getenv("LOCAL_DB_PATH", "") or "").strip()
+    if _pub_root_env and _target_db_env:
+        try:
+            publish.sync_if_changed(Path(_pub_root_env), Path(_target_db_env).parent)
+        except Exception:
+            # Keep app bootable so an operator can inspect logs/configuration.
+            pass
+
 db.init_db()
 
 ROLE_LABELS = {
@@ -106,6 +121,24 @@ def _local_mode_enabled() -> bool:
 
 
 LOCAL_MODE = _local_mode_enabled()
+PUBLISHED_ONLY = _setting("HDK_WEB_PUBLISHED_ONLY", "0").strip().lower() in {"1", "true", "yes", "on"}
+if PUBLISHED_ONLY:
+    LOCAL_MODE = False
+
+
+@st.cache_resource(show_spinner=False)
+def _migrate_project_storage_once(db_path_text: str, data_dir_text: str):
+    return storage.migrate_legacy_layout(Path(db_path_text), Path(data_dir_text))
+
+
+# WIP/local storage is migrated once into isolated per-project folders. Published-only
+# web data already arrives as a portable package and is left untouched.
+_STORAGE_MIGRATION = None
+if not PUBLISHED_ONLY:
+    try:
+        _STORAGE_MIGRATION = _migrate_project_storage_once(str(db.DB_PATH), str(DATA_DIR))
+    except Exception:
+        _STORAGE_MIGRATION = None
 
 
 def _hash_local_admin_pin(pin: str) -> str:
@@ -148,7 +181,7 @@ def _verify_local_admin_pin(pin: str) -> bool:
 _bootstrap_password = _setting("HDK_ADMIN_PASSWORD")
 _bootstrap_email = _setting("HDK_ADMIN_EMAIL", "admin@hdk.local")
 _bootstrap_username = _setting("HDK_ADMIN_USERNAME", "admin")
-if _bootstrap_password:
+if _bootstrap_password and not PUBLISHED_ONLY:
     try:
         db.ensure_system_admin(_bootstrap_email, _bootstrap_password, username=_bootstrap_username)
     except Exception:
@@ -389,11 +422,21 @@ def data_dir_mtime_hint() -> int:
     return latest
 
 
+def _project_storage_paths(project_id: str) -> dict[str, Path]:
+    project = db.get_project(project_id) or {}
+    return storage.project_paths(
+        DATA_DIR,
+        project_id,
+        str(project.get("code") or ""),
+        str(project.get("name") or ""),
+    )
+
+
 def safe_source_archive_path(project_id: str, source_file_id: str, filename: str) -> Path:
     stem = Path(filename).stem
     suffix = Path(filename).suffix.lower() or ".xlsx"
     clean = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)[:80]
-    folder = SOURCE_ARCHIVE_DIR / project_id / source_file_id
+    folder = _project_storage_paths(project_id)["excel"] / source_file_id
     folder.mkdir(parents=True, exist_ok=True)
     return folder / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{clean}{suffix}"
 
@@ -402,19 +445,19 @@ def archive_uploaded_source(project_id: str, source_file_id: str, uploaded, vers
     target = safe_source_archive_path(project_id, source_file_id, uploaded.name)
     target.write_bytes(uploaded.getvalue())
     return db.add_source_file_version(
-        project_id, source_file_id, version_label, uploaded.name, str(target), uploaded.size
+        project_id, source_file_id, version_label, uploaded.name, storage.to_stored_path(target, DATA_DIR), uploaded.size
     )
 
 
 def overwrite_uploaded_source(project_id: str, source_file_id: str, uploaded, version_label: str = "") -> str:
     """Replace the active workbook bytes while preserving source/sheet identity."""
     src = db.get_source_file(source_file_id)
-    old_path = Path(src.get("current_file_path") or "")
+    old_path = storage.resolve_stored_path(src.get("current_file_path") or "", DATA_DIR)
     # Use a fresh safe path so extension/name changes never leave misleading files.
     target = safe_source_archive_path(project_id, source_file_id, uploaded.name)
     target.write_bytes(uploaded.getvalue())
     vid = db.overwrite_current_source_version(
-        source_file_id, uploaded.name, str(target), uploaded.size, version_label
+        source_file_id, uploaded.name, storage.to_stored_path(target, DATA_DIR), uploaded.size, version_label
     )
     try:
         if old_path.exists() and old_path.is_file() and old_path.resolve() != target.resolve():
@@ -439,12 +482,12 @@ def save_project_logo(project_id: str, uploaded, role: str) -> str:
         normalized = normalize_logo_bytes(raw)
     except Exception as exc:
         raise ValueError(f"File logo {role} tidak valid sebagai gambar: {exc}") from exc
-    folder = PROJECT_ASSET_DIR / project_id
+    folder = _project_storage_paths(project_id)["assets"]
     folder.mkdir(parents=True, exist_ok=True)
     clean_role = "".join(ch if ch.isalnum() else "_" for ch in role.lower())[:40]
     target = folder / f"{clean_role}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
     target.write_bytes(normalized)
-    return str(target)
+    return storage.to_stored_path(target, DATA_DIR)
 
 
 
@@ -465,9 +508,9 @@ def render_project_logos(project: dict[str, Any]) -> None:
     cards=[]
     for label, entity, path_text in roles:
         logo_html='<div class="project-logo-placeholder">LOGO</div>'
-        if path_text and Path(str(path_text)).exists():
+        path = storage.resolve_stored_path(path_text or "", DATA_DIR) if path_text else Path("")
+        if path_text and path.exists():
             try:
-                path=Path(str(path_text))
                 uri=_logo_data_uri(str(path), path.stat().st_mtime_ns)
                 logo_html=f'<img class="project-logo-img" src="{uri}" alt="{html.escape(label)}">'
             except Exception:
@@ -498,7 +541,7 @@ def collect_project_visuals(project_id: str, as_of_date: str | None = None) -> t
         path_text = version.get("file_path") if version else row.get("current_file_path")
         if not isinstance(path_text, str) or not path_text.strip():
             continue
-        path = Path(path_text)
+        path = storage.resolve_stored_path(path_text, DATA_DIR)
         if not path.exists() or path.suffix.lower() not in {".xlsx", ".xlsm"}:
             continue
         selected = db.list_source_sheets(row["id"], selected_only=True)
@@ -547,7 +590,7 @@ def get_project_options(user: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, s
 def sidebar_project_selector(user: dict[str, Any]) -> str | None:
     projects, labels = get_project_options(user)
     st.sidebar.markdown("### Project Data Hub")
-    st.sidebar.caption("v2.9.13 · Locked Local Admin · Project Access")
+    st.sidebar.caption("v2.9.19 · Portable Project Paths")
     if projects.empty:
         if user.get("role") == "admin":
             st.sidebar.info("Belum ada proyek. Buat proyek dari menu Master Proyek.")
@@ -574,6 +617,8 @@ def sidebar_project_selector(user: dict[str, Any]) -> str | None:
 def app_access_mode(user: dict[str, Any]) -> str:
     """Only Admin HDK can modify data. All other roles are read-only."""
     force_public = str(st.query_params.get("view", "") or "").lower() == "public"
+    if PUBLISHED_ONLY:
+        return "viewer"
     if str(user.get("role") or "").lower() == "admin" and not force_public:
         return "admin"
     return "viewer"
@@ -625,11 +670,13 @@ def render_active_project_context(project_id: str | None, access_mode: str, user
     return p
 
 
-def safe_photo_path(project_id: str, filename: str) -> Path:
+def safe_photo_path(project_id: str, filename: str, media_type: str = "progress") -> Path:
     stem = Path(filename).stem
     suffix = Path(filename).suffix.lower() or ".jpg"
     clean = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)[:70]
-    project_folder = PHOTO_DIR / project_id
+    paths = _project_storage_paths(project_id)
+    mt = str(media_type or "").lower()
+    project_folder = paths["bim"] if (mt.startswith("bim") or "bim" in mt) else paths["photos"]
     project_folder.mkdir(parents=True, exist_ok=True)
     return project_folder / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{clean}{suffix}"
 
@@ -648,12 +695,12 @@ def save_media_batch(
     for order, file in enumerate(files, start=1):
         try:
             Image.open(io.BytesIO(file.getvalue())).verify()
-            target = safe_photo_path(project_id, file.name)
+            target = safe_photo_path(project_id, file.name, media_type)
             target.write_bytes(file.getvalue())
             db.add_photo(
                 project_id,
                 file_name=file.name,
-                file_path=str(target),
+                file_path=storage.to_stored_path(target, DATA_DIR),
                 captured_date=captured_date.isoformat(),
                 zone=zone,
                 category=category,
@@ -693,15 +740,21 @@ def render_media_batch(
         with target:
             if i < len(batch):
                 row = batch.iloc[i]
-                pp = Path(row["file_path"])
-                if pp.exists():
+                raw_media_path = str(row.get("file_path") or "").strip()
+                pp = storage.resolve_stored_path(raw_media_path, DATA_DIR) if raw_media_path not in {"", ".", "./", ".\\"} else None
+                if pp is not None and pp.is_file():
                     try:
                         if layout == "grid":
                             st.image(cached_fixed_thumbnail(str(pp), pp.stat().st_mtime_ns), use_container_width=True)
                         else:
                             st.image(cached_thumbnail(str(pp), pp.stat().st_mtime_ns, 1500), use_container_width=True)
                     except Exception:
-                        st.image(str(pp), use_container_width=True)
+                        try:
+                            st.image(str(pp), use_container_width=True)
+                        except Exception:
+                            st.caption("Gambar tidak dapat dibuka.")
+                else:
+                    st.markdown('<div class="bento-card"><div class="label">Gambar tidak tersedia</div><div class="sub">File belum tersedia atau referensinya sudah tidak valid.</div></div>', unsafe_allow_html=True)
                 cap = str(row.get("description") or "").strip()
                 if cap:
                     st.caption(cap[:120])
@@ -725,12 +778,22 @@ def render_bim_comparison_grid(project_id: str, as_of_date: str | None = None) -
             with cols[i]:
                 if i < len(batch):
                     row = batch.iloc[i]
-                    pp = Path(row["file_path"])
-                    if pp.exists():
+                    raw_media_path = str(row.get("file_path") or "").strip()
+                    pp = storage.resolve_stored_path(raw_media_path, DATA_DIR) if raw_media_path not in {"", ".", "./", ".\\"} else None
+                    if pp is not None and pp.is_file():
                         try:
                             st.image(cached_fixed_thumbnail(str(pp), pp.stat().st_mtime_ns), use_container_width=True)
                         except Exception:
-                            st.image(str(pp), use_container_width=True)
+                            try:
+                                st.image(str(pp), use_container_width=True)
+                            except Exception:
+                                st.caption("Screenshot BIM tidak dapat dibuka.")
+                    else:
+                        st.markdown(
+                            '<div class="bento-card" style="min-height:150px;display:flex;align-items:center;justify-content:center">'
+                            '<div><div class="label">Gambar tidak tersedia</div><div class="sub">File BIM belum tersedia atau referensinya tidak valid.</div></div></div>',
+                            unsafe_allow_html=True,
+                        )
                     cap = str(row.get("description") or "").strip()
                     if cap:
                         st.caption(cap[:100])
@@ -790,6 +853,7 @@ else:
         "Data Explorer",
         "Master Proyek",
         "User & Akses",
+        "Publish & Sync",
         "Riwayat & Database",
     ]
 page = st.sidebar.radio("Navigasi", nav_options)
@@ -903,6 +967,242 @@ if page == "User & Akses":
             except Exception as exc:
                 st.error(f"Gagal memperbarui user: {exc}")
 
+
+# ------------------------------ Publish & Sync ------------------------------
+elif page == "Publish & Sync":
+    if access_mode != "admin":
+        st.error("Publish & Sync hanya tersedia untuk Admin HDK pada workspace lokal.")
+        st.stop()
+    if not project_id:
+        st.info("Pilih atau buat proyek terlebih dahulu.")
+        st.stop()
+
+    st.markdown(hero(
+        "Publikasikan ke Web",
+        "Data kerja tetap di lokal. Saat sudah siap, publikasikan versi resmi proyek ke web dengan satu langkah."
+    ), unsafe_allow_html=True)
+
+    project = db.get_project(project_id)
+    source_db = Path(db.DB_PATH)
+    publish_root = publish.load_publish_root(DATA_DIR)
+
+    # Apply deferred widget value before the widget is instantiated.
+    pending_publish_root = st.session_state.pop("publish_root_pending", None)
+    if pending_publish_root is not None:
+        st.session_state["publish_root_path"] = str(pending_publish_root)
+    elif "publish_root_path" not in st.session_state:
+        st.session_state["publish_root_path"] = str(publish_root)
+
+    # Folder configuration is intentionally kept out of the daily workflow.
+    with st.expander("Pengaturan lokasi Published (opsional)", expanded=False):
+        st.caption("Biarkan default untuk pemakaian lokal. Jika memakai Google Drive for Desktop, arahkan ke folder Drive di komputer ini.")
+        configured_root = st.text_input(
+            "Lokasi folder Published",
+            help="Contoh Windows: G:\\My Drive\\HDK Project Data Hub\\Published",
+            key="publish_root_path",
+        )
+        root_health = publish.publish_root_health(DATA_DIR, configured_root)
+        if root_health.get("ok"):
+            st.success("Lokasi Published siap digunakan.")
+        else:
+            st.error("Lokasi Published belum siap. Gunakan folder lokal atau pilih folder yang tersedia.")
+        c_save, c_default = st.columns(2)
+        with c_save:
+            if st.button("Simpan Lokasi", use_container_width=True, key="save_publish_root"):
+                try:
+                    publish_root = publish.save_publish_root(DATA_DIR, configured_root)
+                    flash("success", "Lokasi Published disimpan.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Lokasi tidak dapat digunakan: {exc}")
+        with c_default:
+            if st.button("Gunakan Folder Lokal", use_container_width=True, key="use_default_publish_root"):
+                try:
+                    default_root = DATA_DIR / "web_published"
+                    saved_root = publish.save_publish_root(DATA_DIR, default_root)
+                    st.session_state["publish_root_pending"] = str(saved_root)
+                    flash("success", "Folder Published dikembalikan ke lokasi lokal.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Folder lokal tidak dapat digunakan: {exc}")
+    configured_root = st.session_state.get("publish_root_path", str(publish_root))
+    root_health = publish.publish_root_health(DATA_DIR, configured_root)
+    publish_root = publish.normalize_publish_root(DATA_DIR, configured_root)
+    publish_root_ok = bool(root_health.get("ok"))
+
+    # Best-effort recovery once per project/session. This is intentionally silent;
+    # Admin should not have to understand path migrations between app versions.
+    asset_health = publish.project_asset_health(source_db, DATA_DIR, project_id)
+    repair_key = f"auto_asset_repair_done_{project_id}"
+    if (not asset_health.get("ok")) and not st.session_state.get(repair_key):
+        st.session_state[repair_key] = True
+        try:
+            storage.migrate_legacy_layout(Path(db.DB_PATH), DATA_DIR)
+            _migrate_project_storage_once.clear()
+            asset_health = publish.project_asset_health(source_db, DATA_DIR, project_id)
+        except Exception:
+            pass
+
+    try:
+        status = publish.compare_with_current(source_db, DATA_DIR, project_id, publish_root)
+    except Exception as exc:
+        st.error(f"Status publikasi tidak dapat dibaca: {exc}")
+        st.stop()
+
+    local_summary = status["summary"]
+    current_manifest = status.get("current_manifest") or {}
+    current_summary = current_manifest.get("summary") or {}
+    published_at = current_manifest.get("generated_at")
+
+    # Friendly state for day-to-day use. Technical package state stays hidden below.
+    local_complete = bool(asset_health.get("ok"))
+    if not status["is_published"]:
+        friendly_status = "BELUM DIPUBLIKASIKAN"
+        friendly_help = "Proyek ini belum memiliki versi web."
+    elif status["is_up_to_date"] and local_complete:
+        friendly_status = "SUDAH TERPUBLIKASI"
+        friendly_help = "Versi web sudah sama dengan data lokal terbaru."
+    else:
+        friendly_status = "PERLU DIPERBARUI"
+        friendly_help = "Ada perubahan lokal atau paket web lama perlu diperbarui."
+
+    st.markdown("### 1. Status Proyek")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Status Web", friendly_status)
+    with c2:
+        st.metric("Dataset", int(local_summary.get("datasets") or 0))
+    with c3:
+        st.metric("Foto / Visual", int(local_summary.get("photos") or 0))
+    with c4:
+        st.metric("Publish Terakhir", str(published_at or "Belum pernah").replace("T", " ")[:16])
+    st.caption(f"{project.get('code')} · {project.get('name')} · {friendly_help}")
+
+    if local_complete:
+        st.success("Data proyek siap dipublikasikan.")
+    else:
+        missing_assets = asset_health.get("missing") or []
+        counts = {"excel": 0, "visual": 0, "logo": 0, "other": 0}
+        for item in missing_assets:
+            label = str(item.get("label") or "")
+            if label.startswith("photos/"):
+                counts["visual"] += 1
+            elif label.startswith("source_files/") or label.startswith("source_versions/"):
+                counts["excel"] += 1
+            elif label.startswith("Project/"):
+                counts["logo"] += 1
+            else:
+                counts["other"] += 1
+        parts = []
+        if counts["excel"]:
+            parts.append(f"{counts['excel']} file Excel")
+        if counts["visual"]:
+            parts.append(f"{counts['visual']} foto/BIM")
+        if counts["logo"]:
+            parts.append(f"{counts['logo']} logo")
+        if counts["other"]:
+            parts.append(f"{counts['other']} file lain")
+        detail = ", ".join(parts) if parts else f"{asset_health.get('missing_count', 0)} file"
+        st.warning(
+            f"Ada {detail} yang belum ditemukan. Tidak perlu mengurus path atau histori teknis. "
+            "Lengkapi file tersebut pada menu Update Data / Foto & BIM Update / Master Proyek, lalu kembali ke halaman ini."
+        )
+        if st.button("Coba Pulihkan Otomatis", use_container_width=False, key="repair_missing_project_assets_simple"):
+            try:
+                repair = storage.migrate_legacy_layout(Path(db.DB_PATH), DATA_DIR)
+                _migrate_project_storage_once.clear()
+                st.session_state.pop(repair_key, None)
+                recovered = int(repair.get("copied_from_old_build", 0)) + int(repair.get("moved", 0))
+                flash("success", f"Pemulihan selesai. {recovered} file berhasil dipulihkan/dipindahkan.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Pemulihan otomatis belum berhasil: {exc}")
+
+    st.markdown("### 2. Publikasikan")
+    with st.container(border=True):
+        review_ok = st.checkbox(
+            "Dashboard proyek sudah saya cek dan boleh ditampilkan sebagai versi resmi di web.",
+            value=False,
+            key="publish_review_confirm_simple",
+        )
+        no_update_needed = bool(status["is_up_to_date"] and local_complete)
+        publish_disabled = (not review_ok) or no_update_needed or (not publish_root_ok) or (not local_complete)
+        if st.button(
+            "PUBLIKASIKAN KE WEB",
+            type="primary",
+            use_container_width=True,
+            disabled=publish_disabled,
+            key="publish_project_now_simple",
+        ):
+            try:
+                result = publish.publish_project(source_db, DATA_DIR, project_id, publish_root)
+                flash("success", f"Proyek berhasil dipublikasikan ke web · {result['project_code']}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Publikasi gagal: {exc}")
+        if no_update_needed:
+            st.caption("Tidak ada perubahan baru. Versi web sudah terbaru.")
+        elif not local_complete:
+            st.caption("Tombol akan aktif setelah file proyek lengkap.")
+        elif not publish_root_ok:
+            st.caption("Lokasi Published belum siap. Buka Pengaturan lokasi Published di atas.")
+        else:
+            st.caption("Setiap publish membuat versi baru; data kerja lokal tidak berubah.")
+
+    # Current web status is kept simple. Old incomplete packages are history, not a daily-user problem.
+    current_manifest = publish.current_manifest(publish_root, project_id, str(project.get("code") or "")) or current_manifest
+    if current_manifest:
+        versions = publish.list_project_versions(publish_root, project_id, str(project.get("code") or ""))
+        current_ver = current_manifest.get("version")
+        current_entry = next((v for v in versions if v.get("version") == current_ver), None)
+        st.markdown("### 3. Versi Web")
+        with st.container(border=True):
+            if current_entry:
+                current_missing = current_entry.get("missing_files") or []
+                if current_missing and local_complete:
+                    st.info("Versi web lama belum lengkap. Klik PUBLIKASIKAN KE WEB di atas untuk menggantinya dengan paket baru yang lengkap.")
+                elif current_missing:
+                    st.warning("Versi web lama belum lengkap dan beberapa file lokal masih perlu dilengkapi.")
+                else:
+                    st.success("Versi web aktif dalam kondisi lengkap.")
+                st.caption(f"Publish terakhir: {str(current_entry.get('generated_at') or '—').replace('T', ' ')[:19]}")
+
+        with st.expander("Riwayat & pengaturan teknis", expanded=False):
+            st.caption("Bagian ini hanya untuk backup/rollback. Tidak perlu digunakan untuk update normal.")
+            if current_entry:
+                zpath = Path(str(current_entry.get("zip_path") or ""))
+                d1, d2 = st.columns(2)
+                with d1:
+                    st.markdown(f"**Versi aktif:** `{current_ver}`")
+                with d2:
+                    if zpath.exists():
+                        st.download_button(
+                            "Download Backup Published",
+                            data=zpath.read_bytes(),
+                            file_name=zpath.name,
+                            mime="application/zip",
+                            use_container_width=True,
+                            key=f"download_published_{current_ver}",
+                        )
+            if len(versions) > 1:
+                version_ids = [v.get("version") for v in versions if v.get("version")]
+                rb = st.selectbox(
+                    "Rollback ke versi",
+                    version_ids,
+                    index=version_ids.index(current_ver) if current_ver in version_ids else 0,
+                    format_func=lambda vid: next((f"{v.get('generated_at', vid)}" for v in versions if v.get('version') == vid), str(vid)),
+                    key="rollback_publish_version_simple",
+                )
+                if rb != current_ver:
+                    confirm_rb = st.checkbox("Saya yakin ingin mengaktifkan versi lama ini.", key="confirm_publish_rollback_simple")
+                    if st.button("Aktifkan Versi Lama", disabled=not confirm_rb, use_container_width=True, key="activate_publish_version_simple"):
+                        try:
+                            publish.set_current_version(publish_root, project_id, str(project.get("code") or ""), str(rb))
+                            flash("success", "Versi web berhasil dikembalikan.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Rollback gagal: {exc}")
+            st.caption(f"Folder Published: {publish_root}")
 
 # ------------------------------ Master Project ------------------------------
 elif page == "Master Proyek":
@@ -1018,22 +1318,26 @@ elif page == "Master Proyek":
                 l1,l2,l3,l4=st.columns(4)
                 with l1:
                     st.markdown("**Owner**")
-                    if p.get("logo_owner_path") and Path(p["logo_owner_path"]).exists(): st.image(_logo_data_uri(p["logo_owner_path"], Path(p["logo_owner_path"]).stat().st_mtime_ns), use_container_width=True)
+                    owner_logo_path = storage.resolve_stored_path(p.get("logo_owner_path") or "", DATA_DIR)
+                    if p.get("logo_owner_path") and owner_logo_path.exists(): st.image(_logo_data_uri(str(owner_logo_path), owner_logo_path.stat().st_mtime_ns), use_container_width=True)
                     logo_owner_new=st.file_uploader("Ganti Logo Owner", type=["png","jpg","jpeg","webp"], key=f"edit_owner_{project_id}")
                     clear_owner=st.checkbox("Hapus logo Owner", key=f"clear_owner_{project_id}")
                 with l2:
                     st.markdown("**Konsultan Perencana**")
-                    if p.get("logo_consultant_planner_path") and Path(p["logo_consultant_planner_path"]).exists(): st.image(_logo_data_uri(p["logo_consultant_planner_path"], Path(p["logo_consultant_planner_path"]).stat().st_mtime_ns), use_container_width=True)
+                    planner_logo_path = storage.resolve_stored_path(p.get("logo_consultant_planner_path") or "", DATA_DIR)
+                    if p.get("logo_consultant_planner_path") and planner_logo_path.exists(): st.image(_logo_data_uri(str(planner_logo_path), planner_logo_path.stat().st_mtime_ns), use_container_width=True)
                     logo_planner_new=st.file_uploader("Ganti Logo Konsultan Perencana", type=["png","jpg","jpeg","webp"], key=f"edit_planner_{project_id}")
                     clear_planner=st.checkbox("Hapus logo Konsultan Perencana", key=f"clear_planner_{project_id}")
                 with l3:
                     st.markdown("**Konsultan Pengawas**")
-                    if p.get("logo_consultant_path") and Path(p["logo_consultant_path"]).exists(): st.image(_logo_data_uri(p["logo_consultant_path"], Path(p["logo_consultant_path"]).stat().st_mtime_ns), use_container_width=True)
+                    consultant_logo_path = storage.resolve_stored_path(p.get("logo_consultant_path") or "", DATA_DIR)
+                    if p.get("logo_consultant_path") and consultant_logo_path.exists(): st.image(_logo_data_uri(str(consultant_logo_path), consultant_logo_path.stat().st_mtime_ns), use_container_width=True)
                     logo_consultant_new=st.file_uploader("Ganti Logo Konsultan Pengawas", type=["png","jpg","jpeg","webp"], key=f"edit_consultant_{project_id}")
                     clear_consultant=st.checkbox("Hapus logo Konsultan Pengawas", key=f"clear_consultant_{project_id}")
                 with l4:
                     st.markdown("**Kontraktor**")
-                    if p.get("logo_contractor_path") and Path(p["logo_contractor_path"]).exists(): st.image(_logo_data_uri(p["logo_contractor_path"], Path(p["logo_contractor_path"]).stat().st_mtime_ns), use_container_width=True)
+                    contractor_logo_path = storage.resolve_stored_path(p.get("logo_contractor_path") or "", DATA_DIR)
+                    if p.get("logo_contractor_path") and contractor_logo_path.exists(): st.image(_logo_data_uri(str(contractor_logo_path), contractor_logo_path.stat().st_mtime_ns), use_container_width=True)
                     logo_contractor_new=st.file_uploader("Ganti Logo Kontraktor", type=["png","jpg","jpeg","webp"], key=f"edit_contractor_{project_id}")
                     clear_contractor=st.checkbox("Hapus logo Kontraktor", key=f"clear_contractor_{project_id}")
             with t4:
@@ -1068,14 +1372,20 @@ elif page == "Master Proyek":
 
 
         with st.expander("Penyimpanan & backup proyek", expanded=False):
-            st.caption("Semua data tersimpan di folder `data` milik aplikasi/server. Browser publik hanya membaca dashboard; file sumber tidak disimpan di browser pengunjung.")
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            sc1.metric("Database SQLite", fmt_bytes(db.database_size_bytes()))
-            sc2.metric("Arsip Excel", fmt_bytes(_folder_size(SOURCE_ARCHIVE_DIR / project_id)))
-            sc3.metric("Foto", fmt_bytes(_folder_size(PHOTO_DIR / project_id)))
-            sc4.metric("Logo", fmt_bytes(_folder_size(PROJECT_ASSET_DIR / project_id)))
-            st.code(str(DATA_DIR), language=None)
-            st.caption("Saat dipindah ke web, folder ini harus ditempatkan pada persistent disk/volume. Jangan memakai storage ephemeral untuk produksi.")
+            paths = _project_storage_paths(project_id)
+            st.caption("File fisik setiap proyek dipisahkan ke folder proyek masing-masing. Database SQLite tetap satu sebagai indeks pusat untuk master proyek, user, akses, dan register.")
+            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+            sc1.metric("Database Pusat", fmt_bytes(db.database_size_bytes()))
+            sc2.metric("Arsip Excel", fmt_bytes(_folder_size(paths["excel"])))
+            sc3.metric("Foto", fmt_bytes(_folder_size(paths["photos"])))
+            sc4.metric("BIM Visual", fmt_bytes(_folder_size(paths["bim"])))
+            sc5.metric("Logo / Asset", fmt_bytes(_folder_size(paths["assets"])))
+            st.markdown("**Folder proyek aktif**")
+            st.code(str(paths["root"]), language=None)
+            st.caption("Struktur WIP: source/excel · photos · bim · assets · snapshots. Paket web dipisahkan di folder web_published. File proyek lain tidak disimpan di folder ini.")
+            if _STORAGE_MIGRATION and _STORAGE_MIGRATION.get("moved"):
+                st.success(f"Migrasi struktur lama selesai: {_STORAGE_MIGRATION.get('moved', 0)} file dipindahkan ke folder proyek masing-masing.")
+            st.caption("Saat dipindah ke web/server, folder `data` harus berada pada persistent disk/volume. Jangan memakai storage ephemeral untuk produksi.")
 
 
 
@@ -1211,7 +1521,7 @@ elif page == "Visual Sheet":
         else:
             path_text = vmap[version]["file_path"]
             version_label = vmap[version]["label"]
-        path = Path(path_text) if path_text else None
+        path = storage.resolve_stored_path(path_text, DATA_DIR) if path_text else None
         sheet_name = cfg["sheet_name"]
         st.caption(f"{selected_function} · {cfg.get('display_name') or sheet_name} · versi {version_label}")
         desc = cfg.get("sheet_description")
@@ -1370,7 +1680,7 @@ elif page == "Update Data":
                         action_text = f"File {uploaded.name} diarsipkan sebagai versi '{version_label}'"
                     try:
                         src = db.get_source_file(sfid)
-                        archived_path = Path(src.get("current_file_path") or "")
+                        archived_path = storage.resolve_stored_path(src.get("current_file_path") or "", DATA_DIR)
                         quality = workbook_quality(archived_path, selected_sheets) if archived_path.exists() and archived_path.suffix.lower() in {".xlsx", ".xlsm"} else {"error_count":0}
                         warn = f" · warning formula/error: {quality.get('error_count',0)}" if quality.get("error_count",0) else ""
                     except Exception:
@@ -1380,7 +1690,7 @@ elif page == "Update Data":
 
             existing_file = db.get_source_file_by_name(project_id, uploaded.name)
             if existing_file:
-                current_path = Path(existing_file.get("current_file_path") or "")
+                current_path = storage.resolve_stored_path(existing_file.get("current_file_path") or "", DATA_DIR)
                 if current_path.exists() and current_path.suffix.lower() in {".xlsx", ".xlsm"}:
                     selected_now = db.list_source_sheets(existing_file["id"], selected_only=True)
                     selected_names_now = tuple(selected_now["sheet_name"].tolist()) if not selected_now.empty else tuple()
@@ -1521,7 +1831,7 @@ elif page == "Update Data":
                         # Profil khusus tidak meminta user memahami key database.
                         # File aktif harus diarsipkan terlebih dahulu karena arsip tersebut juga menjadi histori visual.
                         if profile_kind in ({"s_curve", "lookahead"} | ENGINEERING_REGISTER_KINDS):
-                            current_path = Path(existing_file.get("current_file_path") or "")
+                            current_path = storage.resolve_stored_path(existing_file.get("current_file_path") or "", DATA_DIR)
                             if not current_path.exists():
                                 st.warning("Klik **Simpan file, sheet & versi** terlebih dahulu. Setelah itu Data Hub membaca profil sheet dari file yang sudah diarsipkan.")
                                 st.stop()
@@ -2083,7 +2393,7 @@ elif page == "Foto & BIM Update":
         cols = st.columns(4)
         for pos, (_, row) in enumerate(gallery.iterrows()):
             with cols[pos % 4]:
-                pth = Path(row["file_path"])
+                pth = storage.resolve_stored_path(row["file_path"], DATA_DIR)
                 if pth.exists():
                     try:
                         thumb = cached_thumbnail(str(pth), pth.stat().st_mtime_ns, 800)
@@ -2103,7 +2413,7 @@ elif page == "Foto & BIM Update":
                 if st.button("Hapus", key=f"del_photo_{row['id']}"):
                     file_path = db.delete_photo(row["id"])
                     if file_path:
-                        try: Path(file_path).unlink(missing_ok=True)
+                        try: storage.resolve_stored_path(file_path, DATA_DIR).unlink(missing_ok=True)
                         except Exception: pass
                     flash("success", "Media dihapus.")
                     st.rerun()

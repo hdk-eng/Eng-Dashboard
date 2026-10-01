@@ -1,3 +1,108 @@
+# HDK Project Data Hub v2.9.20
+
+## WIP → Publish → Web
+
+## Perbaikan v2.9.20 — Portable Project Paths & Publish Integrity
+
+- Path Excel, foto, BIM, dan logo di SQLite sekarang disimpan **relatif terhadap folder `data`**, bukan path absolut build/version.
+- Saat pindah folder aplikasi/versi, referensi file tetap valid selama folder `data` ikut dipindahkan.
+- Jika database lama masih menunjuk ke build sebelumnya, aplikasi mencoba memulihkan file dari folder versi lama yang berada di lokasi sibling yang sama, lalu menyalinnya ke folder proyek aktif.
+- Publish sekarang memiliki **integrity gate**: paket Published tidak boleh dibuat jika masih ada Excel/foto/BIM/logo yang hilang.
+- Menu Publish menyediakan tombol **Coba Pulihkan File dari Versi Sebelumnya**.
+- Struktur per proyek tetap terisolasi berdasarkan Internal Project ID.
+
+## Perbaikan sebelumnya — Publish Session State
+- Memperbaiki error Streamlit `publish_root_path cannot be modified after the widget ... is instantiated`.
+- Tombol **Pakai Folder Lokal** sekarang memakai pending state lalu rerun, sehingga path dapat diganti tanpa bentrok dengan widget.
+- Tombol **Simpan Lokasi** tetap menyimpan path yang sedang tampil.
+
+- Folder Published divalidasi dan dibuat otomatis sebelum publish.
+- Ada tombol **Pakai Folder Lokal** jika path Google Drive/drive letter tidak tersedia.
+- Error publish sekarang menyebut tahap yang gagal, bukan hanya `[WinError 3]`.
+- Paket publish setengah jadi otomatis dibersihkan jika proses gagal.
+- Nama folder paket diperpendek agar lebih aman terhadap batas panjang path Windows.
+- Virtual environment dipindahkan ke `%LOCALAPPDATA%\HDKDataHub\venv` agar instalasi Python tidak terkena `WinError 206` walaupun folder aplikasi panjang.
+
+## Struktur penyimpanan v2.9.20 — per proyek
+
+File fisik WIP sekarang **tidak lagi dicampur** pada folder global berdasarkan jenis file. Setiap proyek memiliki satu folder sendiri berdasarkan Project Code + Internal Project ID yang immutable:
+
+```text
+data/
+├── project_hub.db                    # database pusat: project, user, access, register
+├── projects/
+│   ├── 5HDK10__<project_id>/
+│   │   ├── source/excel/             # seluruh workbook dan versi sumber proyek ini
+│   │   ├── photos/                   # foto lapangan
+│   │   ├── bim/                      # BIM screenshot / visual
+│   │   ├── assets/                   # 4 logo/asset proyek
+│   │   └── snapshots/                # ruang snapshot fisik bila diperlukan
+│   └── 5HDK11__<project_id>/
+│       └── ...
+└── web_published/
+    └── projects/                     # paket Published per proyek + histori versi
+```
+
+- Internal Project ID menjadi jangkar folder sehingga perubahan nama/kode proyek tidak mencampur data.
+- Saat aplikasi lokal pertama kali dibuka, layout lama `data/uploads/excel`, `data/photos`, dan `data/project_assets` dimigrasikan otomatis ke folder proyek masing-masing dan path database ikut diperbarui.
+- Folder lama hanya dibersihkan jika benar-benar kosong; file yang tidak dikenali tidak dihapus.
+- Publish tetap dilakukan **per proyek** ke `web_published`, sehingga Project A tidak menimpa Project B.
+
+---
+
+Versi ini menambahkan workflow publikasi agar data proyek tidak perlu di-upload ke GitHub dan perubahan lokal tidak langsung terlihat oleh Owner/Konsultan.
+
+Alur utama:
+
+```text
+LOCAL / WIP
+  ↓ Admin review
+Publish & Sync
+  ↓ paket per proyek + histori versi
+Published Folder / Google Drive for Desktop
+  ↓ sync
+WEB / READ ONLY
+```
+
+### Yang baru
+
+- Menu **Publish & Sync** khusus Admin Lokal.
+- Publish dilakukan **per proyek**, bukan seluruh database sekaligus.
+- Setiap publish membuat versi baru; versi lama tidak ditimpa.
+- Ada status **Belum Publish / Ada Perubahan / Up To Date**.
+- Preview jumlah dataset, row, file sumber, foto/BIM, snapshot, dan user access sebelum publish.
+- Paket Published berbentuk folder versi + ZIP self-contained.
+- Akun Admin **tidak ikut** ke paket Published.
+- Owner/Konsultan/Internal dan hak akses proyek ikut ke paket web.
+- Ada **Rollback Current Published** tanpa mengubah WIP lokal.
+- Folder Published dapat diarahkan ke folder **Google Drive for Desktop**.
+- `START_WEB_PREVIEW.bat` membangun web read-only dari **Current Published** saja, sehingga hasil publish dapat diuji sebelum deploy.
+- `SYNC_PUBLISHED_TO_WEB.py` / `.bat` membangun database web dari seluruh Current Published project packages.
+
+### Cara uji lokal
+
+1. Jalankan `START_DASHBOARD.bat`.
+2. Masuk sebagai Admin Lokal dengan PIN.
+3. Pilih proyek → **Publish & Sync**.
+4. Untuk tahap awal, pakai folder default `data/web_published`, atau arahkan ke folder Google Drive for Desktop.
+5. Centang konfirmasi review → klik **PUBLISH PROJECT INI**.
+6. Tutup dashboard lokal bila perlu, lalu jalankan `START_WEB_PREVIEW.bat`.
+7. Login memakai user Internal/Owner/Konsultan. Web Preview hanya menampilkan data yang sudah Published.
+
+### Google Drive
+
+Google Drive dipakai sebagai **media sinkronisasi paket Published**, bukan tempat menjalankan SQLite secara langsung. Pilih folder yang sudah disinkron oleh Google Drive for Desktop, misalnya:
+
+```text
+G:\My Drive\HDK Project Data Hub\Published
+```
+
+GitHub tetap hanya berisi source code aplikasi. Folder `data/`, paket Published, foto, Excel, dan database tidak perlu di-commit.
+
+> Streamlit Community Cloud tidak dapat membaca folder Google Drive for Desktop di komputer lokal secara langsung. Untuk produksi, gunakan server dengan folder Drive/rclone yang mounted, atau konektor Google Drive API. Struktur paket v2.9.20 sudah disiapkan agar tahap konektor tersebut tidak mengubah workflow Admin.
+
+---
+
 
 ## v2.9.13 — Nama User / Username Login
 

@@ -1,48 +1,52 @@
+# Deploy Web — HDK Project Data Hub v2.9.20
 
-> **Penting:** Jangan set `HDK_LOCAL_MODE=1` pada Streamlit Cloud, Docker publik, atau server. Variabel itu hanya dipasang otomatis oleh `START_DASHBOARD.bat` untuk recovery/pengujian di `127.0.0.1`.
+## Prinsip
 
-# Deploy HDK Project Data Hub v2.9.10
+- **Local Admin = WIP / update / upload / review.**
+- **Web = Published / read-only.**
+- GitHub hanya menyimpan kode aplikasi.
+- Excel, foto, BIM screenshot, SQLite Published, dan histori publish disimpan di storage terpisah.
 
-## Secrets / environment wajib
+## Pengujian lokal sebelum deploy
 
-Set sebelum aplikasi dipakai di internet:
+1. Publish minimal satu proyek dari menu **Publish & Sync**.
+2. Jalankan `START_WEB_PREVIEW.bat`.
+3. Script membangun `data/web_preview/project_hub.db` hanya dari paket **Current Published**.
+4. Login dengan user Internal/Owner/Konsultan untuk memeriksa hak akses dan tampilan web.
+
+## Server produksi dengan folder Published yang mounted
+
+Folder Published harus berada di lokasi terpisah dari folder data web. Contoh:
 
 ```text
-HDK_ADMIN_USERNAME=admin.hdk
-HDK_ADMIN_EMAIL=admin@hdk.co.id
-HDK_ADMIN_PASSWORD=password-admin-yang-kuat
-HDK_PUBLIC_BASE_URL=https://dashboard.domainanda.com/
+/mnt/hdk-published        <- Google Drive/rclone/shared storage
+/opt/hdk-web-data         <- database + asset runtime web
 ```
 
-Untuk Streamlit Community Cloud, masukkan sebagai **Secrets**. Untuk Windows Server gunakan environment variable. Untuk Docker gunakan `.env`/environment.
+Environment:
 
-`HDK_ADMIN_USERNAME` + `HDK_ADMIN_EMAIL` + `HDK_ADMIN_PASSWORD` adalah **System/Recovery Admin**. Akun ini selalu dijaga aktif sebagai Admin: jika belum ada akan dibuat, dan jika email yang sama sudah ada tetapi password/role/status berbeda akan disinkronkan otomatis saat aplikasi start. Ini mencegah Admin terkunci setelah database sudah memiliki user.
-
-Setelah login sebagai Admin, buat dan kelola seluruh akun lain dari menu **User & Akses**. Tidak ada pendaftaran publik.
-
-## Role
-
-- Admin HDK: semua proyek, full edit/update.
-- Internal HDK: semua proyek, read-only.
-- Owner: hanya proyek assigned, read-only.
-- Konsultan Pengawas: hanya proyek assigned, read-only.
-
-Hak akses proyek dicek di backend. Mengubah query `?project=...` tidak memberikan akses ke proyek lain.
-
-## Persistent storage
-
-Folder `data` harus persistent karena berisi SQLite, Excel, foto, logo, snapshot, dan user access.
-
-Contoh Docker:
-
-```bash
-docker run -d --name hdk-dashboard --restart unless-stopped \
-  -p 8501:8501 \
-  -v /opt/hdk-dashboard/data:/app/data \
-  -e HDK_ADMIN_USERNAME=admin.hdk \
-  -e HDK_ADMIN_EMAIL=admin@hdk.co.id \
-  -e HDK_ADMIN_PASSWORD='PASSWORD_KUAT' \
-  hdk-project-hub
+```text
+HDK_WEB_PUBLISHED_ONLY=1
+HDK_AUTO_SYNC_PUBLISHED=1
+HDK_PUBLISH_ROOT=/mnt/hdk-published
+LOCAL_DB_PATH=/opt/hdk-web-data/project_hub.db
 ```
 
-Untuk produksi dengan banyak update bersamaan, pertimbangkan migrasi database dari SQLite ke PostgreSQL.
+Saat aplikasi web start, jika `published_index.json` berubah, aplikasi dapat membangun ulang data web dari Current Published packages. Akun Admin tidak tersedia pada Published Web.
+
+> Jangan meletakkan `HDK_PUBLISH_ROOT` di dalam folder target data web karena proses sync mengganti target data secara utuh.
+
+## Google Drive
+
+Pada komputer Admin, menu **Publish & Sync** dapat diarahkan ke folder Google Drive for Desktop. Pada server, folder yang sama dapat diakses dengan Google Drive/rclone mount.
+
+Streamlit Community Cloud tidak memiliki akses langsung ke folder Google Drive Desktop di PC Admin. Jika tetap memakai Community Cloud, diperlukan konektor Google Drive API/object storage pada tahap deployment berikutnya.
+
+## Security
+
+- Tidak ada pendaftaran publik.
+- Admin Lokal memakai PIN dan hanya tersedia saat `HDK_LOCAL_MODE=1` pada localhost.
+- Paket Published menghapus akun role `admin`.
+- Internal HDK melihat semua proyek Published.
+- Owner/Konsultan hanya melihat project assignment mereka.
+- Hak akses dicek di backend, bukan hanya dropdown proyek.

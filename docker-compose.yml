@@ -1,0 +1,11 @@
+services:
+  hdk-dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      HDK_ADMIN_PASSWORD: ${HDK_ADMIN_PASSWORD}
+      HDK_PUBLIC_BASE_URL: ${HDK_PUBLIC_BASE_URL:-http://localhost:8501/}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

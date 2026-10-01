@@ -1,4 +1,52 @@
-# HDK Project Data Hub v2.9.6
+
+## v2.9.13 — Nama User / Username Login
+
+Untuk pengujian **lokal**, jalankan `START_DASHBOARD.bat`. Launcher ini mengaktifkan `HDK_LOCAL_MODE=1` dan Streamlit tetap diikat ke `127.0.0.1` (localhost).
+
+- Jika database belum punya user, aplikasi otomatis masuk sebagai **Admin Lokal** agar Admin dapat membuat akun pertama dari menu **User & Akses**.
+- Jika database lama sudah berisi user dan login Admin bermasalah, halaman Login lokal menampilkan tombol **Masuk sebagai Admin Lokal**.
+- Admin Lokal dapat membuat/reset akun user, mengatur role, dan akses proyek.
+- Tombol **Keluar / Uji Login User** mengembalikan halaman Login sehingga akun Owner/Konsultan/Internal dapat diuji.
+- Tombol Admin Lokal **tidak tersedia** pada Streamlit Cloud/server normal karena `HDK_LOCAL_MODE` tidak diaktifkan di sana.
+- Login user sekarang memakai **Nama User / Username**; email tetap disimpan sebagai identitas/kontak dan sementara masih dapat dipakai sebagai fallback kompatibilitas.
+- Admin membuat `Nama User`, nama lengkap, email, role, password awal, dan akses proyek dari menu **User & Akses**.
+- Deployment web memakai `HDK_ADMIN_USERNAME` + `HDK_ADMIN_EMAIL` + `HDK_ADMIN_PASSWORD` untuk recovery/system admin.
+
+
+## Perubahan utama v2.9.10
+
+- Master Proyek sekarang memiliki **4 identitas organisasi**: Owner, Konsultan Perencana, Konsultan Pengawas, dan Kontraktor.
+- Masing-masing identitas memiliki nama perusahaan dan logo tersendiri.
+- Header proyek diubah menjadi **compact 4-party brand strip** yang lebih kecil, ringan, dan seragam.
+- Logo tetap auto-crop dan auto-fit tanpa mengubah rasio; logo lama tetap kompatibel.
+- Database lama dimigrasikan otomatis dengan field `consultant_planner_name` dan `logo_consultant_planner_path`.
+- Data proyek lama, Excel, foto, snapshot, user access, dan project ID tidak berubah.
+
+
+## User & Project Access (v2.9.8)
+
+Aplikasi sekarang memakai login dan hak akses per proyek:
+
+- **Admin HDK**: semua proyek + upload/edit/delete/User Management.
+- **Internal HDK**: semua proyek, read-only.
+- **Owner**: hanya proyek yang ditugaskan, read-only.
+- **Konsultan Pengawas**: hanya proyek yang ditugaskan, read-only.
+
+Admin mengelola user dari menu **User & Akses**. Hak akses juga divalidasi pada `project_id`, sehingga user eksternal tidak dapat membuka proyek lain hanya dengan mengganti URL.
+
+### Bootstrap Admin pertama
+
+Pada server/Streamlit Secrets set:
+
+```toml
+HDK_ADMIN_USERNAME = "admin.hdk"
+HDK_ADMIN_EMAIL = "admin@hdk.co.id"
+HDK_ADMIN_PASSWORD = "password-yang-kuat"
+```
+
+System/Recovery Admin dijaga tetap tersedia. Setelah login, seluruh user operasional dikelola oleh Admin dari menu **User & Akses**.
+
+# HDK Project Data Hub v2.9.10
 
 Project Data Hub untuk **multi-proyek, multi-file, multi-sheet**, dengan Excel sebagai media bulk update, SQLite sebagai master data lokal/server, visual dashboard, foto lapangan, screenshot 3D BIM, BIMx, version log, snapshot, dan Public Viewer read-only.
 
@@ -198,3 +246,12 @@ Lihat `DEPLOY_WEB.md`.
 
 ## Migrasi dari v2.7.x
 Folder `data` dari versi lama dapat dipertahankan. Saat file sumber disimpan ulang di v2.9, fungsi sheet lama yang masih terlalu umum seperti `Engineering & BIM`, `Progress & Schedule`, atau `Other` akan dipetakan ulang otomatis ke fungsi sheet yang lebih spesifik bila profilnya dikenali.
+
+### v2.9.13 — Locked Local Admin
+- Form login umum hanya menerima akun `Internal`, `Owner`, dan `Konsultan`.
+- Role `Admin` ditolak dari form login umum walaupun username/password diketahui.
+- Admin lokal hanya dapat masuk dari launcher localhost (`START_DASHBOARD.bat`) menggunakan PIN khusus.
+- Pada pemakaian pertama, sistem meminta pembuatan PIN Admin Lokal minimal 8 karakter.
+- PIN tidak disimpan sebagai teks biasa; file `data/.local_admin_pin` hanya berisi salt + PBKDF2 hash.
+- Jika PIN terlupa, jalankan `RESET_LOCAL_ADMIN_PIN.bat`, lalu buat PIN baru dari localhost.
+- User Management tidak lagi menawarkan pembuatan akun Admin biasa.

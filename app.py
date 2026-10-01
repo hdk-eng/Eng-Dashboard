@@ -5,6 +5,7 @@ import os
 import base64
 import mimetypes
 import hashlib
+import hmac
 import re
 import html
 import shutil
@@ -44,6 +45,7 @@ SOURCE_ARCHIVE_DIR = DATA_DIR / "uploads" / "excel"
 SOURCE_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 PROJECT_ASSET_DIR = DATA_DIR / "project_assets"
 PROJECT_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+LOCAL_ADMIN_PIN_FILE = DATA_DIR / ".local_admin_pin"
 
 SHEET_FUNCTIONS = [
     "Project Control · Kurva S",
@@ -76,6 +78,178 @@ st.set_page_config(
 )
 st.markdown(BENTO_CSS, unsafe_allow_html=True)
 db.init_db()
+
+ROLE_LABELS = {
+    "admin": "Admin HDK",
+    "internal": "Internal HDK",
+    "owner": "Owner",
+    "consultant": "Konsultan (Perencana/Pengawas)",
+}
+
+
+def _setting(name: str, default: str = "") -> str:
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return str(os.getenv(name, default) or default)
+
+
+def _local_mode_enabled() -> bool:
+    """True only when the local Windows launcher explicitly enables local test mode.
+
+    The launcher binds Streamlit to 127.0.0.1, so this recovery path is not exposed
+    to other computers. Cloud/server deployments do not set HDK_LOCAL_MODE.
+    """
+    return _setting("HDK_LOCAL_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+LOCAL_MODE = _local_mode_enabled()
+
+
+def _hash_local_admin_pin(pin: str) -> str:
+    pin = str(pin or "")
+    if len(pin) < 8:
+        raise ValueError("PIN Admin Lokal minimal 8 karakter.")
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, 240_000)
+    return f"v1:{salt.hex()}:{digest.hex()}"
+
+
+def _local_admin_pin_is_configured() -> bool:
+    try:
+        return LOCAL_ADMIN_PIN_FILE.exists() and bool(LOCAL_ADMIN_PIN_FILE.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+
+
+def _set_local_admin_pin(pin: str) -> None:
+    LOCAL_ADMIN_PIN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = _hash_local_admin_pin(pin)
+    LOCAL_ADMIN_PIN_FILE.write_text(payload, encoding="utf-8")
+
+
+def _verify_local_admin_pin(pin: str) -> bool:
+    try:
+        payload = LOCAL_ADMIN_PIN_FILE.read_text(encoding="utf-8").strip()
+        version, salt_hex, digest_hex = payload.split(":", 2)
+        if version != "v1":
+            return False
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+        actual = hashlib.pbkdf2_hmac("sha256", str(pin or "").encode("utf-8"), salt, 240_000)
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+
+# System/recovery Admin from server/Streamlit Secrets. Safe to run on every app start.
+_bootstrap_password = _setting("HDK_ADMIN_PASSWORD")
+_bootstrap_email = _setting("HDK_ADMIN_EMAIL", "admin@hdk.local")
+_bootstrap_username = _setting("HDK_ADMIN_USERNAME", "admin")
+if _bootstrap_password:
+    try:
+        db.ensure_system_admin(_bootstrap_email, _bootstrap_password, username=_bootstrap_username)
+    except Exception:
+        pass
+
+
+def require_login() -> dict[str, Any]:
+    """App authentication with a separate, local-only Admin gate.
+
+    Normal username/password login is intentionally limited to non-admin users.
+    Admin access in local test mode is available only from localhost and requires
+    a dedicated local PIN stored as a salted PBKDF2 hash in the data directory.
+    """
+    local_admin = {
+        "id": "__local_admin__",
+        "email": "local-admin@hdk",
+        "username": "local-admin",
+        "full_name": "Administrator Lokal HDK",
+        "role": "admin",
+        "active": 1,
+    }
+
+    if LOCAL_MODE and st.session_state.get("local_admin_mode"):
+        return local_admin
+
+    user_id = st.session_state.get("auth_user_id")
+    if user_id:
+        user = db.get_user(user_id)
+        if user and int(user.get("active", 0)) == 1 and str(user.get("role") or "").lower() != "admin":
+            return user
+        st.session_state.pop("auth_user_id", None)
+
+    st.markdown(hero("HDK Project Data Hub", "Masuk untuk melihat proyek sesuai hak akses Anda."), unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 1.35, 1])
+    with c2:
+        with st.container(border=True):
+            st.markdown("### Login")
+            with st.form("rbac_login_form"):
+                login_name = st.text_input("Nama User", placeholder="contoh: gagah.hdk")
+                password = st.text_input("Password", type="password")
+                submit = st.form_submit_button("Masuk", type="primary", use_container_width=True)
+            if submit:
+                user = db.authenticate_user(login_name, password)
+                if user and str(user.get("role") or "").lower() == "admin":
+                    st.error("Akun Admin tidak dapat digunakan dari form login umum. Gunakan akses Admin Lokal pada komputer server.")
+                elif user:
+                    st.session_state["auth_user_id"] = user["id"]
+                    st.session_state.pop("local_admin_mode", None)
+                    st.rerun()
+                else:
+                    st.error("Nama User/password tidak sesuai atau user sudah dinonaktifkan.")
+
+            if LOCAL_MODE:
+                st.markdown("---")
+                st.caption("Admin dikunci khusus komputer ini (localhost). Akun Admin tidak bisa digunakan melalui login umum.")
+                if not _local_admin_pin_is_configured():
+                    st.markdown("#### Buat PIN Admin Lokal")
+                    st.caption("Pengaturan satu kali. PIN disimpan dalam bentuk hash, bukan teks biasa. Minimal 8 karakter.")
+                    with st.form("setup_local_admin_pin"):
+                        pin1 = st.text_input("PIN Admin Lokal baru", type="password")
+                        pin2 = st.text_input("Ulangi PIN", type="password")
+                        setup_pin = st.form_submit_button("Simpan PIN Admin Lokal", use_container_width=True)
+                    if setup_pin:
+                        if pin1 != pin2:
+                            st.error("PIN dan konfirmasi PIN tidak sama.")
+                        else:
+                            try:
+                                _set_local_admin_pin(pin1)
+                                st.success("PIN Admin Lokal berhasil dibuat. Silakan masuk menggunakan PIN tersebut.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(str(exc))
+                else:
+                    with st.form("local_admin_pin_login"):
+                        local_pin = st.text_input("PIN Admin Lokal", type="password")
+                        admin_submit = st.form_submit_button("Masuk sebagai Admin Lokal", use_container_width=True)
+                    if admin_submit:
+                        if _verify_local_admin_pin(local_pin):
+                            st.session_state.pop("auth_user_id", None)
+                            st.session_state["local_admin_mode"] = True
+                            st.rerun()
+                        else:
+                            st.error("PIN Admin Lokal tidak sesuai.")
+
+            st.caption("Akun user dibuat oleh Admin HDK · tidak ada pendaftaran publik. Owner dan Konsultan hanya melihat proyek yang diberikan kepada mereka.")
+    st.stop()
+
+
+def logout_button(user: dict[str, Any]) -> None:
+    st.sidebar.caption(f"{ROLE_LABELS.get(user.get('role'), user.get('role'))} · {user.get('full_name') or user.get('username')}")
+    if user.get("id") == "__local_admin__":
+        if LOCAL_MODE and st.sidebar.button("Keluar / Uji Login User", use_container_width=True, key="local_admin_logout"):
+            st.session_state.pop("local_admin_mode", None)
+            st.session_state.pop("auth_user_id", None)
+            st.session_state.pop("project_id", None)
+            st.rerun()
+        return
+    if st.sidebar.button("Keluar", use_container_width=True, key="rbac_logout"):
+        st.session_state.pop("auth_user_id", None)
+        st.session_state.pop("project_id", None)
+        st.rerun()
 
 
 def _date_value(value: Any) -> date | None:
@@ -281,9 +455,10 @@ def _logo_data_uri(path_text: str, mtime_ns: int) -> str:
 
 
 def render_project_logos(project: dict[str, Any]) -> None:
-    """Compact, presentation-ready three-party identity strip."""
+    """Compact, presentation-ready four-party identity strip."""
     roles = [
         ("OWNER", project.get("client") or "Owner / Client", project.get("logo_owner_path")),
+        ("KONSULTAN PERENCANA", project.get("consultant_planner_name") or "Konsultan Perencana", project.get("logo_consultant_planner_path")),
         ("KONSULTAN PENGAWAS", project.get("consultant_name") or "Konsultan Pengawas", project.get("logo_consultant_path")),
         ("KONTRAKTOR", project.get("contractor_name") or "Kontraktor", project.get("logo_contractor_path")),
     ]
@@ -361,61 +536,46 @@ def render_flash() -> None:
     getattr(st, kind, st.info)(text)
 
 
-def get_project_options() -> tuple[pd.DataFrame, dict[str, str]]:
-    projects = db.list_projects()
+def get_project_options(user: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, str]]:
+    projects = db.list_projects_for_user(user)
     if projects.empty:
         return projects, {}
-    labels = {
-        row["id"]: f"{row['code']} · {row['name']}"
-        for _, row in projects.iterrows()
-    }
+    labels = {row["id"]: f"{row['code']} · {row['name']}" for _, row in projects.iterrows()}
     return projects, labels
 
 
-def sidebar_project_selector() -> str | None:
-    projects, labels = get_project_options()
+def sidebar_project_selector(user: dict[str, Any]) -> str | None:
+    projects, labels = get_project_options(user)
     st.sidebar.markdown("### Project Data Hub")
-    st.sidebar.caption("v2.9.6 · Active Project Context · Interactive Engineering · Register Sync · BIMx")
+    st.sidebar.caption("v2.9.13 · Locked Local Admin · Project Access")
     if projects.empty:
-        st.sidebar.info("Belum ada proyek. Buat proyek dari menu Master Proyek.")
+        if user.get("role") == "admin":
+            st.sidebar.info("Belum ada proyek. Buat proyek dari menu Master Proyek.")
+        else:
+            st.sidebar.warning("Belum ada proyek yang diberikan kepada akun Anda.")
         return None
     ids = projects["id"].tolist()
     query_project = str(st.query_params.get("project", "") or "")
-    force_public = str(st.query_params.get("view", "") or "").lower() == "public"
-    if force_public and query_project in ids:
-        selected = query_project
-        st.sidebar.caption("Proyek")
+    if query_project and query_project not in ids:
+        st.sidebar.warning("Proyek pada link tidak termasuk hak akses akun ini.")
+    current = query_project if query_project in ids else st.session_state.get("project_id")
+    index = ids.index(current) if current in ids else 0
+    if len(ids) == 1:
+        selected = ids[0]
+        st.sidebar.caption("Proyek aktif")
         st.sidebar.markdown(f"**{labels[selected]}**")
     else:
-        current = query_project if query_project in ids else st.session_state.get("project_id")
-        index = ids.index(current) if current in ids else 0
         selected = st.sidebar.selectbox("Proyek aktif", ids, index=index, format_func=lambda x: labels[x])
     st.session_state["project_id"] = selected
+    st.query_params["project"] = selected
     return selected
 
 
-def app_access_mode() -> str:
-    """Viewer by default on web when an admin password is configured; local remains admin-friendly."""
-    admin_password = os.getenv("HDK_ADMIN_PASSWORD", "").strip()
+def app_access_mode(user: dict[str, Any]) -> str:
+    """Only Admin HDK can modify data. All other roles are read-only."""
     force_public = str(st.query_params.get("view", "") or "").lower() == "public"
-    if not admin_password:
-        st.sidebar.caption("Mode lokal · Admin password belum dikonfigurasi")
-        return "viewer" if force_public else "admin"
-    if st.session_state.get("admin_authenticated"):
-        st.sidebar.success("Admin Mode")
-        if st.sidebar.button("Keluar Admin", use_container_width=True):
-            st.session_state["admin_authenticated"] = False
-            st.rerun()
+    if str(user.get("role") or "").lower() == "admin" and not force_public:
         return "admin"
-    st.sidebar.info("Public Viewer · read-only")
-    with st.sidebar.expander("Admin Login", expanded=False):
-        pwd = st.text_input("Password admin", type="password", key="admin_password_input")
-        if st.button("Masuk", use_container_width=True, key="admin_login_btn"):
-            if pwd == admin_password:
-                st.session_state["admin_authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Password salah.")
     return "viewer"
 
 
@@ -430,7 +590,7 @@ def render_project_header(project_id: str, subtitle: str = "") -> dict[str, Any]
     return p
 
 
-def render_active_project_context(project_id: str | None, access_mode: str) -> dict[str, Any] | None:
+def render_active_project_context(project_id: str | None, access_mode: str, user: dict[str, Any]) -> dict[str, Any] | None:
     """Persistent project context bar so admin always knows where changes will be saved."""
     if not project_id:
         return None
@@ -440,7 +600,8 @@ def render_active_project_context(project_id: str | None, access_mode: str) -> d
     code = html.escape(str(p.get("code") or "—"))
     name = html.escape(str(p.get("name") or "—"))
     location = html.escape(str(p.get("location") or ""))
-    mode_text = "ADMIN · EDIT & UPDATE" if access_mode == "admin" else "PUBLIC VIEWER · READ ONLY"
+    role_label = ROLE_LABELS.get(str(user.get("role") or ""), str(user.get("role") or "").upper())
+    mode_text = f"{role_label} · EDIT & UPDATE" if access_mode == "admin" else f"{role_label} · READ ONLY"
     mode_bg = "#fff7ed" if access_mode == "admin" else "#eff6ff"
     mode_fg = "#9a3412" if access_mode == "admin" else "#1d4ed8"
     loc_html = f'<span style="opacity:.65;margin-left:10px">{location}</span>' if location else ''
@@ -451,8 +612,8 @@ def render_active_project_context(project_id: str | None, access_mode: str) -> d
         f'<div style="font-size:.67rem;font-weight:800;padding:5px 9px;border-radius:999px;background:{mode_bg};color:{mode_fg};white-space:nowrap">{mode_text}</div></div>',
         unsafe_allow_html=True,
     )
-    projects, labels = get_project_options()
-    if access_mode == "admin" and not projects.empty:
+    projects, labels = get_project_options(user)
+    if not projects.empty and len(projects) > 1:
         ids = projects["id"].tolist()
         with st.popover("Ganti Proyek", use_container_width=False):
             idx = ids.index(project_id) if project_id in ids else 0
@@ -612,9 +773,11 @@ def dataset_selector(project_id: str, key: str, label: str = "Dataset") -> str |
     )
 
 
-# ------------------------------ Sidebar ------------------------------
-project_id = sidebar_project_selector()
-access_mode = app_access_mode()
+# ------------------------------ Login / Sidebar ------------------------------
+current_user = require_login()
+access_mode = app_access_mode(current_user)
+project_id = sidebar_project_selector(current_user)
+logout_button(current_user)
 if access_mode == "viewer":
     nav_options = ["Dashboard Proyek", "Visual Sheet"]
 else:
@@ -626,6 +789,7 @@ else:
         "Quick Edit Data",
         "Data Explorer",
         "Master Proyek",
+        "User & Akses",
         "Riwayat & Database",
     ]
 page = st.sidebar.radio("Navigasi", nav_options)
@@ -636,15 +800,116 @@ else:
     st.sidebar.caption("Read-only · data tidak dapat diubah")
 
 render_flash()
-active_project = render_active_project_context(project_id, access_mode)
+active_project = render_active_project_context(project_id, access_mode, current_user)
+
+
+# ------------------------------ User & Project Access ------------------------------
+if page == "User & Akses":
+    if access_mode != "admin":
+        st.error("User & Akses hanya tersedia untuk Admin HDK.")
+        st.stop()
+    st.markdown(hero("User & Project Access", "Atur siapa yang dapat melihat proyek dan siapa yang dapat melakukan update."), unsafe_allow_html=True)
+    st.info("Admin Lokal memiliki akses penuh ke semua proyek. Akun Admin tidak dibuat/dipakai melalui login umum. Internal HDK dapat melihat semua proyek. Owner dan Konsultan hanya dapat melihat proyek yang ditugaskan.")
+
+    all_projects = db.list_projects()
+    project_ids_all = all_projects["id"].tolist() if not all_projects.empty else []
+    project_labels_all = {r["id"]: f"{r['code']} · {r['name']}" for _, r in all_projects.iterrows()} if not all_projects.empty else {}
+    role_options = ["internal", "owner", "consultant"]
+
+    c_new, c_list = st.columns([1, 1.35])
+    with c_new:
+        with st.container(border=True):
+            st.markdown("### Tambah User")
+            with st.form("create_rbac_user", clear_on_submit=True):
+                u_username = st.text_input("Nama User / Username *", placeholder="contoh: budi.owner", help="Dipakai untuk login. Huruf kecil/angka serta . _ - diperbolehkan.")
+                u_name = st.text_input("Nama lengkap")
+                u_email = st.text_input("Email *", help="Untuk identitas/kontak. Login utama menggunakan Nama User.")
+                u_role = st.selectbox("Role *", role_options, format_func=lambda x: ROLE_LABELS[x])
+                u_password = st.text_input("Password awal *", type="password", help="Minimal 8 karakter. User dapat meminta Admin mereset password bila diperlukan.")
+                if u_role in {"owner", "consultant"}:
+                    u_projects = st.multiselect("Akses proyek", project_ids_all, format_func=lambda x: project_labels_all.get(x, x))
+                else:
+                    u_projects = []
+                    st.caption("Role ini otomatis mendapat akses ke semua proyek.")
+                u_active = st.checkbox("Aktif", value=True)
+                create_user_btn = st.form_submit_button("Buat User", type="primary", use_container_width=True)
+            if create_user_btn:
+                try:
+                    if u_role in {"owner", "consultant"} and not u_projects:
+                        st.warning("User dibuat tanpa akses proyek. Anda dapat menambahkan proyek dari panel Edit User.")
+                    db.create_user(u_username, u_email, u_name, u_role, u_password, u_projects, u_active)
+                    flash("success", f"User {u_username} berhasil dibuat.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Gagal membuat user: {exc}")
+
+    with c_list:
+        st.markdown("### Daftar User")
+        users_df = db.list_users()
+        if users_df.empty:
+            st.info("Belum ada user.")
+        else:
+            show_users = users_df.copy()
+            show_users["role"] = show_users["role"].map(ROLE_LABELS).fillna(show_users["role"])
+            show_users["active"] = show_users["active"].map({1: "Aktif", 0: "Nonaktif"})
+            show_users = show_users.rename(columns={"username":"Nama User","email":"Email","full_name":"Nama Lengkap","role":"Role","active":"Status","project_count":"Jumlah Proyek"})
+            st.dataframe(show_users[[c for c in ["Nama User","Nama Lengkap","Email","Role","Status","Jumlah Proyek"] if c in show_users.columns]], use_container_width=True, hide_index=True)
+
+    users_df = db.list_users()
+    if not users_df.empty:
+        st.markdown("---")
+        st.markdown("### Edit User & Akses Proyek")
+        user_ids = users_df["id"].tolist()
+        user_map = users_df.set_index("id").to_dict("index")
+        selected_uid = st.selectbox(
+            "Pilih user",
+            user_ids,
+            format_func=lambda uid: f"{user_map[uid].get('username')} · {user_map[uid].get('full_name') or 'Tanpa nama'} · {ROLE_LABELS.get(user_map[uid].get('role'), user_map[uid].get('role'))}",
+            key="rbac_selected_user",
+        )
+        selected_user = user_map[selected_uid]
+        existing_projects = db.user_project_ids(selected_uid)
+        e1, e2 = st.columns([1, 1.25])
+        with e1:
+            e_username = st.text_input("Nama User / Username", value=selected_user.get("username") or "", key=f"rbac_username_{selected_uid}")
+            e_name = st.text_input("Nama lengkap", value=selected_user.get("full_name") or "", key=f"rbac_name_{selected_uid}")
+            e_email = st.text_input("Email", value=selected_user.get("email") or "", key=f"rbac_email_{selected_uid}")
+            current_role = selected_user.get("role") or "owner"
+            if current_role == "admin":
+                st.text_input("Role", value="Admin HDK · terkunci", disabled=True, key=f"rbac_role_locked_{selected_uid}")
+                e_role = "admin"
+            else:
+                e_role = st.selectbox("Role", role_options, index=role_options.index(current_role) if current_role in role_options else 1,
+                                      format_func=lambda x: ROLE_LABELS[x], key=f"rbac_role_{selected_uid}")
+            e_active = st.checkbox("User aktif", value=bool(selected_user.get("active")), key=f"rbac_active_{selected_uid}", disabled=(current_role == "admin"))
+            reset_password = st.text_input("Password baru (opsional)", type="password", key=f"rbac_pwd_{selected_uid}", help="Kosongkan jika tidak ingin mengganti password.")
+        with e2:
+            if e_role in {"owner", "consultant"}:
+                e_projects = st.multiselect("Proyek yang dapat dilihat", project_ids_all, default=[x for x in existing_projects if x in project_ids_all],
+                                            format_func=lambda x: project_labels_all.get(x, x), key=f"rbac_projects_{selected_uid}")
+                st.caption("User hanya dapat melihat proyek yang dipilih di atas. Mengubah URL ke proyek lain tetap akan ditolak.")
+            else:
+                e_projects = []
+                st.success("Role ini otomatis dapat melihat semua proyek.")
+        if current_role == "admin":
+            st.warning("Akun Admin database lama dikunci dan tidak digunakan untuk login umum. Admin lokal menggunakan PIN khusus localhost.")
+        save_disabled = current_role == "admin"
+        if st.button("Simpan User & Akses", type="primary", use_container_width=True, disabled=save_disabled, key=f"save_rbac_{selected_uid}"):
+            try:
+                db.update_user(selected_uid, username=e_username, email=e_email, full_name=e_name, role=e_role, active=e_active,
+                               password=reset_password or None, project_ids=e_projects)
+                flash("success", "User dan akses proyek berhasil diperbarui.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Gagal memperbarui user: {exc}")
 
 
 # ------------------------------ Master Project ------------------------------
-if page == "Master Proyek":
+elif page == "Master Proyek":
     if access_mode != "admin":
         st.error("Master Proyek hanya tersedia pada Admin Mode.")
         st.stop()
-    st.markdown(hero("Master Proyek", "Identitas proyek, kontrak, 3 logo resmi, BIMx, dan pengaturan publikasi. Internal Project ID tetap dikunci."), unsafe_allow_html=True)
+    st.markdown(hero("Master Proyek", "Identitas proyek, kontrak, 4 logo resmi, BIMx, dan pengaturan publikasi. Internal Project ID tetap dikunci."), unsafe_allow_html=True)
     projects = db.list_projects()
     left, right = st.columns([1, 1.25])
     with left:
@@ -653,8 +918,9 @@ if page == "Master Proyek":
             code = st.text_input("Kode proyek *", placeholder="RSIA-MDN")
             name = st.text_input("Nama proyek *")
             owner_name = st.text_input("Owner / Client")
-            contractor_name = st.text_input("Kontraktor", value="PT Harkat Digdaya Konstruksi")
+            planner_name = st.text_input("Konsultan Perencana")
             consultant_name = st.text_input("Konsultan Pengawas")
+            contractor_name = st.text_input("Kontraktor", value="PT Harkat Digdaya Konstruksi")
             location = st.text_input("Lokasi")
             c1,c2=st.columns(2)
             with c1:
@@ -670,10 +936,11 @@ if page == "Master Proyek":
                 contract_vat_status = st.selectbox("PPN", ["Belum termasuk PPN", "Termasuk PPN"], index=0)
             st.markdown("##### Logo resmi proyek")
             st.caption("Logo otomatis di-crop, dipertahankan rasionya, lalu dinormalisasi ke canvas standar agar ukuran visual terlihat seragam.")
-            l1,l2,l3=st.columns(3)
+            l1,l2,l3,l4=st.columns(4)
             with l1: logo_owner = st.file_uploader("Logo Owner", type=["png","jpg","jpeg","webp"], key="create_logo_owner")
-            with l2: logo_consultant = st.file_uploader("Logo Konsultan", type=["png","jpg","jpeg","webp"], key="create_logo_consultant")
-            with l3: logo_contractor = st.file_uploader("Logo Kontraktor", type=["png","jpg","jpeg","webp"], key="create_logo_contractor")
+            with l2: logo_planner = st.file_uploader("Logo Konsultan Perencana", type=["png","jpg","jpeg","webp"], key="create_logo_planner")
+            with l3: logo_consultant = st.file_uploader("Logo Konsultan Pengawas", type=["png","jpg","jpeg","webp"], key="create_logo_consultant")
+            with l4: logo_contractor = st.file_uploader("Logo Kontraktor", type=["png","jpg","jpeg","webp"], key="create_logo_contractor")
             bimx = st.text_input("Link BIMx", placeholder="https://...")
             desc = st.text_area("Deskripsi")
             submit = st.form_submit_button("Buat proyek", use_container_width=True)
@@ -688,10 +955,11 @@ if page == "Master Proyek":
                         contract_no=contract_no, contract_start=_date_iso(contract_start),
                         contract_finish=_date_iso(contract_finish), revised_finish=_date_iso(revised_finish),
                         contract_value=contract_value, contract_vat_status=contract_vat_status,
-                        contractor_name=contractor_name, consultant_name=consultant_name,
+                        contractor_name=contractor_name, consultant_planner_name=planner_name, consultant_name=consultant_name,
                     )
                     logo_updates={}
                     if logo_owner is not None: logo_updates["logo_owner_path"] = save_project_logo(new_id, logo_owner, "owner")
+                    if logo_planner is not None: logo_updates["logo_consultant_planner_path"] = save_project_logo(new_id, logo_planner, "konsultan_perencana")
                     if logo_consultant is not None: logo_updates["logo_consultant_path"] = save_project_logo(new_id, logo_consultant, "konsultan_pengawas")
                     if logo_contractor is not None: logo_updates["logo_contractor_path"] = save_project_logo(new_id, logo_contractor, "kontraktor")
                     if logo_updates: db.update_project(new_id, **logo_updates)
@@ -705,9 +973,9 @@ if page == "Master Proyek":
         if projects.empty:
             st.info("Belum ada proyek.")
         else:
-            cols=[c for c in ["code","name","client","consultant_name","contractor_name","location","function_count","photo_count","updated_at"] if c in projects.columns]
+            cols=[c for c in ["code","name","client","consultant_planner_name","consultant_name","contractor_name","location","function_count","photo_count","updated_at"] if c in projects.columns]
             show = projects[cols].copy()
-            rename={"code":"Kode","name":"Nama","client":"Owner","consultant_name":"Konsultan","contractor_name":"Kontraktor","location":"Lokasi","function_count":"Fungsi","photo_count":"Foto","updated_at":"Update"}
+            rename={"code":"Kode","name":"Nama","client":"Owner","consultant_planner_name":"Konsultan Perencana","consultant_name":"Konsultan Pengawas","contractor_name":"Kontraktor","location":"Lokasi","function_count":"Fungsi","photo_count":"Foto","updated_at":"Update"}
             st.dataframe(show.rename(columns=rename), use_container_width=True, hide_index=True)
 
     if project_id:
@@ -724,6 +992,7 @@ if page == "Master Proyek":
                     e_code = st.text_input("Kode", value=p.get("code") or "")
                     e_name = st.text_input("Nama", value=p.get("name") or "")
                     e_owner = st.text_input("Owner / Client", value=p.get("client") or "")
+                    e_planner = st.text_input("Konsultan Perencana", value=p.get("consultant_planner_name") or "")
                 with c2:
                     e_location = st.text_input("Lokasi", value=p.get("location") or "")
                     e_consultant=st.text_input("Konsultan Pengawas", value=p.get("consultant_name") or "")
@@ -746,18 +1015,23 @@ if page == "Master Proyek":
                     e_vat = st.selectbox("PPN", vat_options, index=vat_options.index(current_vat) if current_vat in vat_options else 0)
             with t3:
                 st.caption("Preview memakai normalisasi otomatis yang sama dengan Executive Dashboard. Upload baru akan menjadi logo aktif.")
-                l1,l2,l3=st.columns(3)
+                l1,l2,l3,l4=st.columns(4)
                 with l1:
                     st.markdown("**Owner**")
                     if p.get("logo_owner_path") and Path(p["logo_owner_path"]).exists(): st.image(_logo_data_uri(p["logo_owner_path"], Path(p["logo_owner_path"]).stat().st_mtime_ns), use_container_width=True)
                     logo_owner_new=st.file_uploader("Ganti Logo Owner", type=["png","jpg","jpeg","webp"], key=f"edit_owner_{project_id}")
                     clear_owner=st.checkbox("Hapus logo Owner", key=f"clear_owner_{project_id}")
                 with l2:
+                    st.markdown("**Konsultan Perencana**")
+                    if p.get("logo_consultant_planner_path") and Path(p["logo_consultant_planner_path"]).exists(): st.image(_logo_data_uri(p["logo_consultant_planner_path"], Path(p["logo_consultant_planner_path"]).stat().st_mtime_ns), use_container_width=True)
+                    logo_planner_new=st.file_uploader("Ganti Logo Konsultan Perencana", type=["png","jpg","jpeg","webp"], key=f"edit_planner_{project_id}")
+                    clear_planner=st.checkbox("Hapus logo Konsultan Perencana", key=f"clear_planner_{project_id}")
+                with l3:
                     st.markdown("**Konsultan Pengawas**")
                     if p.get("logo_consultant_path") and Path(p["logo_consultant_path"]).exists(): st.image(_logo_data_uri(p["logo_consultant_path"], Path(p["logo_consultant_path"]).stat().st_mtime_ns), use_container_width=True)
-                    logo_consultant_new=st.file_uploader("Ganti Logo Konsultan", type=["png","jpg","jpeg","webp"], key=f"edit_consultant_{project_id}")
-                    clear_consultant=st.checkbox("Hapus logo Konsultan", key=f"clear_consultant_{project_id}")
-                with l3:
+                    logo_consultant_new=st.file_uploader("Ganti Logo Konsultan Pengawas", type=["png","jpg","jpeg","webp"], key=f"edit_consultant_{project_id}")
+                    clear_consultant=st.checkbox("Hapus logo Konsultan Pengawas", key=f"clear_consultant_{project_id}")
+                with l4:
                     st.markdown("**Kontraktor**")
                     if p.get("logo_contractor_path") and Path(p["logo_contractor_path"]).exists(): st.image(_logo_data_uri(p["logo_contractor_path"], Path(p["logo_contractor_path"]).stat().st_mtime_ns), use_container_width=True)
                     logo_contractor_new=st.file_uploader("Ganti Logo Kontraktor", type=["png","jpg","jpeg","webp"], key=f"edit_contractor_{project_id}")
@@ -774,6 +1048,8 @@ if page == "Master Proyek":
                 try:
                     if clear_owner: logo_updates["logo_owner_path"] = ""
                     elif logo_owner_new is not None: logo_updates["logo_owner_path"] = save_project_logo(project_id, logo_owner_new, "owner")
+                    if clear_planner: logo_updates["logo_consultant_planner_path"] = ""
+                    elif logo_planner_new is not None: logo_updates["logo_consultant_planner_path"] = save_project_logo(project_id, logo_planner_new, "konsultan_perencana")
                     if clear_consultant: logo_updates["logo_consultant_path"] = ""
                     elif logo_consultant_new is not None: logo_updates["logo_consultant_path"] = save_project_logo(project_id, logo_consultant_new, "konsultan_pengawas")
                     if clear_contractor: logo_updates["logo_contractor_path"] = ""
@@ -783,7 +1059,7 @@ if page == "Master Proyek":
                         project_id, code=e_code, name=e_name, client=e_owner, location=e_location,
                         bimx_url=e_bimx, description=e_desc, contract_no=e_contract_no,
                         contract_start=_date_iso(e_start), contract_finish=_date_iso(e_finish), revised_finish=_date_iso(e_revised),
-                        contract_value=e_value, contract_vat_status=e_vat, contractor_name=e_contractor, consultant_name=e_consultant, **logo_updates,
+                        contract_value=e_value, contract_vat_status=e_vat, contractor_name=e_contractor, consultant_planner_name=e_planner, consultant_name=e_consultant, **logo_updates,
                     )
                     flash("success", "Master proyek dan logo diperbarui tanpa mengubah Internal Project ID.")
                     st.rerun()

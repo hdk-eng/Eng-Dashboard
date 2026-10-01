@@ -2622,4 +2622,3 @@ elif page == "Riwayat & Database":
             help="Gunakan backup ini bila memindahkan aplikasi/server agar file dan database tetap lengkap.",
         )
         st.info("Backup SQLite saja tidak membawa file JPG/PNG/logo/arsip Excel. Untuk migrasi atau disaster recovery gunakan FULL BACKUP atau copy seluruh folder `data`.")
-

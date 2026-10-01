@@ -18,15 +18,15 @@ BENTO_CSS = """
 .section-title{font-size:1.13rem;font-weight:740;margin:10px 0 8px}.pill{display:inline-block;border:1px solid var(--card-border);border-radius:99px;padding:3px 8px;font-size:.74rem;opacity:.72;margin-right:4px}
 [data-testid="stDataFrame"],[data-testid="stDataEditor"]{border-radius:15px;overflow:hidden}div[data-testid="stPlotlyChart"]{border:1px solid var(--card-border);border-radius:19px;padding:7px}.stButton>button,.stDownloadButton>button{border-radius:11px}
 .photo-card{border:1px solid var(--card-border);border-radius:18px;padding:10px;margin-bottom:10px}
-.project-brand-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;border:1px solid var(--card-border);border-radius:18px;overflow:hidden;margin:2px 0 12px;background:linear-gradient(145deg,rgba(255,255,255,.042),rgba(255,255,255,.010));box-shadow:0 8px 24px rgba(0,0,0,.028)}
-.project-party{min-height:104px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:10px 14px;text-align:center;position:relative}
-.project-party:not(:last-child){border-right:1px solid var(--card-border)}
-.project-party-role{font-size:.58rem;font-weight:820;letter-spacing:.14em;opacity:.48;min-height:12px}
-.project-party-logo{width:142px;height:50px;max-width:72%;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;padding:0;box-shadow:inset 0 0 0 1px rgba(0,0,0,.07),0 3px 10px rgba(0,0,0,.055);overflow:hidden}
+.project-brand-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:4px 0 14px;background:transparent}
+.project-party{min-height:96px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:9px 10px;text-align:center;border:1px solid var(--card-border);border-radius:16px;background:linear-gradient(155deg,rgba(255,255,255,.055),rgba(255,255,255,.012));box-shadow:0 5px 16px rgba(0,0,0,.028)}
+.project-party-role{font-size:.56rem;font-weight:820;letter-spacing:.12em;opacity:.48;min-height:11px}
+.project-party-logo{width:128px;height:42px;max-width:82%;border-radius:9px;background:#fff;display:flex;align-items:center;justify-content:center;padding:0;box-shadow:inset 0 0 0 1px rgba(0,0,0,.055);overflow:hidden}
 .project-logo-img{display:block;width:100%;height:100%;object-fit:contain}
-.project-logo-placeholder{font-size:.62rem;font-weight:800;letter-spacing:.15em;color:#9aa0aa}
-.project-party-name{font-size:.76rem;font-weight:690;line-height:1.18;letter-spacing:-.005em;overflow-wrap:anywhere;min-height:1.8em;display:flex;align-items:flex-start;justify-content:center}
-@media(max-width:900px){.project-brand-strip{grid-template-columns:1fr}.project-party:not(:last-child){border-right:0;border-bottom:1px solid var(--card-border)}.project-party{min-height:96px}.project-party-logo{width:138px;height:48px}}
+.project-logo-placeholder{font-size:.58rem;font-weight:800;letter-spacing:.14em;color:#a1a7b0}
+.project-party-name{font-size:.72rem;font-weight:680;line-height:1.15;letter-spacing:-.004em;overflow-wrap:anywhere;min-height:1.65em;display:flex;align-items:flex-start;justify-content:center}
+@media(max-width:1100px){.project-brand-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.project-brand-strip{grid-template-columns:1fr}.project-party{min-height:90px}.project-party-logo{width:122px;height:40px}}
 </style>
 """
 

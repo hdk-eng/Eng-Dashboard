@@ -5,6 +5,8 @@ import os
 import re
 import sqlite3
 import uuid
+import hashlib
+import secrets
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -123,9 +125,11 @@ def init_db() -> None:
                 report_period TEXT,
                 bim_revision TEXT,
                 contractor_name TEXT,
+                consultant_planner_name TEXT,
                 consultant_name TEXT,
                 logo_contractor_path TEXT,
                 logo_owner_path TEXT,
+                logo_consultant_planner_path TEXT,
                 logo_consultant_path TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -273,6 +277,28 @@ def init_db() -> None:
                 detail TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                username TEXT,
+                full_name TEXT,
+                role TEXT NOT NULL CHECK(role IN ('admin','internal','owner','consultant')),
+                password_hash TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_project_access (
+                user_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                access_level TEXT NOT NULL DEFAULT 'view',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, project_id),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
             """
         )
 
@@ -291,14 +317,44 @@ def init_db() -> None:
             "report_period": "TEXT",
             "bim_revision": "TEXT",
             "contractor_name": "TEXT",
+            "consultant_planner_name": "TEXT",
             "consultant_name": "TEXT",
             "logo_contractor_path": "TEXT",
             "logo_owner_path": "TEXT",
+            "logo_consultant_planner_path": "TEXT",
             "logo_consultant_path": "TEXT",
         }
         for col, typ in project_additions.items():
             if col not in project_cols:
                 conn.execute(f"ALTER TABLE projects ADD COLUMN {quote_ident(col)} {typ}")
+
+        # Migrasi v2.9.12: login memakai Nama User / Username.
+        # Email tetap disimpan sebagai identitas/kontak dan sebagai fallback kompatibilitas.
+        user_cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "username" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+
+        rows = conn.execute("SELECT id, email, full_name, username FROM users ORDER BY created_at, id").fetchall()
+        used_usernames: set[str] = set()
+        for row in rows:
+            current_username = str(row["username"] or "").strip().lower()
+            if current_username:
+                base = re.sub(r"[^a-z0-9._-]+", "-", current_username).strip("-._") or "user"
+            else:
+                email_local = str(row["email"] or "").split("@", 1)[0].strip().lower()
+                name_base = str(row["full_name"] or "").strip().lower().replace(" ", ".")
+                base = email_local or name_base or "user"
+                base = re.sub(r"[^a-z0-9._-]+", "-", base).strip("-._") or "user"
+            candidate = base[:48]
+            suffix = 2
+            while candidate.lower() in used_usernames:
+                tail = f"-{suffix}"
+                candidate = f"{base[:48-len(tail)]}{tail}"
+                suffix += 1
+            used_usernames.add(candidate.lower())
+            if current_username != candidate:
+                conn.execute("UPDATE users SET username=? WHERE id=?", (candidate, row["id"]))
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(username COLLATE NOCASE)")
 
         # Migrasi v2.4: arsip file asli per versi untuk visual sheet/historical view.
         sf_cols = {r[1] for r in conn.execute("PRAGMA table_info(source_files)").fetchall()}
@@ -373,8 +429,8 @@ def create_project(
     code: str, name: str, client: str = "", location: str = "", description: str = "", bimx_url: str = "",
     contract_no: str = "", contract_start: str = "", contract_finish: str = "", revised_finish: str = "",
     project_manager: str = "", site_manager: str = "", contract_value: float | None = None,
-    contract_vat_status: str = "Belum termasuk PPN", report_period: str = "", bim_revision: str = "", contractor_name: str = "", consultant_name: str = "",
-    logo_contractor_path: str = "", logo_owner_path: str = "", logo_consultant_path: str = "",
+    contract_vat_status: str = "Belum termasuk PPN", report_period: str = "", bim_revision: str = "", contractor_name: str = "", consultant_planner_name: str = "", consultant_name: str = "",
+    logo_contractor_path: str = "", logo_owner_path: str = "", logo_consultant_planner_path: str = "", logo_consultant_path: str = "",
 ) -> str:
     init_db()
     project_id = uuid.uuid4().hex[:12]
@@ -385,15 +441,15 @@ def create_project(
             INSERT INTO projects(
                 id, code, name, client, location, description, bimx_url, contract_no, contract_start,
                 contract_finish, revised_finish, project_manager, site_manager, contract_value, contract_vat_status,
-                report_period, bim_revision, contractor_name, consultant_name, logo_contractor_path,
-                logo_owner_path, logo_consultant_path, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                report_period, bim_revision, contractor_name, consultant_planner_name, consultant_name, logo_contractor_path,
+                logo_owner_path, logo_consultant_planner_path, logo_consultant_path, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (project_id, code.strip(), name.strip(), client.strip(), location.strip(), description.strip(), bimx_url.strip(),
              contract_no.strip(), contract_start.strip(), contract_finish.strip(), revised_finish.strip(),
              project_manager.strip(), site_manager.strip(), contract_value, contract_vat_status.strip(), report_period.strip(), bim_revision.strip(),
-             contractor_name.strip(), consultant_name.strip(), logo_contractor_path.strip(), logo_owner_path.strip(),
-             logo_consultant_path.strip(), now, now),
+             contractor_name.strip(), consultant_planner_name.strip(), consultant_name.strip(), logo_contractor_path.strip(), logo_owner_path.strip(),
+             logo_consultant_planner_path.strip(), logo_consultant_path.strip(), now, now),
         )
         _audit(conn, project_id, None, "CREATE_PROJECT", f"{code} - {name}")
     return project_id
@@ -403,8 +459,8 @@ def update_project(project_id: str, **fields: Any) -> None:
     allowed = {
         "code", "name", "client", "location", "description", "bimx_url", "contract_no",
         "contract_start", "contract_finish", "revised_finish", "project_manager", "site_manager",
-        "contract_value", "contract_vat_status", "report_period", "bim_revision", "contractor_name", "consultant_name",
-        "logo_contractor_path", "logo_owner_path", "logo_consultant_path",
+        "contract_value", "contract_vat_status", "report_period", "bim_revision", "contractor_name", "consultant_planner_name", "consultant_name",
+        "logo_contractor_path", "logo_owner_path", "logo_consultant_planner_path", "logo_consultant_path",
     }
     updates: dict[str, Any] = {}
     for k, v in fields.items():
@@ -463,6 +519,299 @@ def get_project(project_id: str) -> dict[str, Any]:
         raise KeyError(f"Project {project_id} tidak ditemukan")
     return dict(row)
 
+
+PASSWORD_ITERATIONS = 260_000
+
+
+def _hash_password(password: str, salt_hex: str | None = None) -> str:
+    if not password or len(password) < 8:
+        raise ValueError("Password minimal 8 karakter.")
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(password: str, encoded: str) -> bool:
+    try:
+        scheme, iterations, salt_hex, digest_hex = str(encoded).split("$", 3)
+        if scheme != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(iterations))
+        return secrets.compare_digest(digest.hex(), digest_hex)
+    except Exception:
+        return False
+
+
+def user_count() -> int:
+    init_db()
+    with _connect() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+
+def _normalize_username(username: str) -> str:
+    value = (username or "").strip().lower()
+    value = re.sub(r"\s+", "-", value)
+    value = re.sub(r"[^a-z0-9._-]+", "-", value).strip("-._")
+    if len(value) < 3:
+        raise ValueError("Nama User minimal 3 karakter.")
+    if len(value) > 48:
+        raise ValueError("Nama User maksimal 48 karakter.")
+    return value
+
+
+def ensure_system_admin(email: str, password: str, full_name: str = "Administrator HDK", username: str = "admin") -> str | None:
+    """Pastikan recovery Admin selalu tersedia. Login utamanya memakai username."""
+    init_db()
+    email = (email or "").strip().lower()
+    password = password or ""
+    username = _normalize_username(username or "admin")
+    if not email:
+        email = f"{username}@hdk.local"
+    if not password:
+        return None
+    if len(password) < 8:
+        raise ValueError("HDK_ADMIN_PASSWORD minimal 8 karakter.")
+
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE lower(username)=lower(?) OR lower(email)=lower(?) LIMIT 1",
+            (username, email),
+        ).fetchone()
+        now = datetime.now().isoformat(timespec="seconds")
+
+        if not row:
+            user_id = uuid.uuid4().hex[:16]
+            conn.execute(
+                "INSERT INTO users(id,email,username,full_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (user_id, email, username, full_name.strip(), "admin", _hash_password(password), 1, now, now),
+            )
+            conn.execute(
+                "INSERT INTO audit_log(project_id,dataset_id,action,detail,created_at) VALUES(NULL,NULL,?,?,?)",
+                ("CREATE_SYSTEM_ADMIN", f"{username} | {email}", now),
+            )
+            return user_id
+
+        user = dict(row)
+        user_id = user["id"]
+        updates: dict[str, Any] = {}
+        repaired: list[str] = []
+
+        if str(user.get("username") or "").strip().lower() != username:
+            conflict = conn.execute(
+                "SELECT id FROM users WHERE lower(username)=lower(?) AND id<>?", (username, user_id)
+            ).fetchone()
+            if not conflict:
+                updates["username"] = username
+                repaired.append("username")
+        if str(user.get("role") or "").lower() != "admin":
+            updates["role"] = "admin"
+            repaired.append("role")
+        if int(user.get("active") or 0) != 1:
+            updates["active"] = 1
+            repaired.append("active")
+        if not _verify_password(password, user.get("password_hash") or ""):
+            updates["password_hash"] = _hash_password(password)
+            repaired.append("password")
+        if not str(user.get("full_name") or "").strip():
+            updates["full_name"] = full_name.strip()
+            repaired.append("name")
+        if not str(user.get("email") or "").strip():
+            updates["email"] = email
+            repaired.append("email")
+
+        if updates:
+            updates["updated_at"] = now
+            sets = ", ".join(f"{quote_ident(k)}=?" for k in updates)
+            conn.execute(f"UPDATE users SET {sets} WHERE id=?", list(updates.values()) + [user_id])
+            conn.execute(
+                "INSERT INTO audit_log(project_id,dataset_id,action,detail,created_at) VALUES(NULL,NULL,?,?,?)",
+                ("REPAIR_SYSTEM_ADMIN", f"{username}; synced={','.join(repaired)}", now),
+            )
+        return user_id
+
+
+def ensure_bootstrap_admin(email: str, password: str, full_name: str = "Administrator HDK", username: str = "admin") -> str | None:
+    """Backward-compatible alias for older callers."""
+    return ensure_system_admin(email, password, full_name, username)
+
+
+def authenticate_user(login_name: str, password: str) -> dict[str, Any] | None:
+    """Login dengan Nama User. Email tetap diterima sebagai fallback selama masa migrasi."""
+    init_db()
+    login_name = (login_name or "").strip().lower()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM users
+            WHERE active=1
+              AND (lower(username)=lower(?) OR lower(email)=lower(?))
+            LIMIT 1
+            """,
+            (login_name, login_name),
+        ).fetchone()
+    if not row:
+        return None
+    user = dict(row)
+    if not _verify_password(password or "", user.get("password_hash") or ""):
+        return None
+    user.pop("password_hash", None)
+    return user
+
+
+def get_user(user_id: str) -> dict[str, Any] | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    out.pop("password_hash", None)
+    return out
+
+
+def list_users() -> pd.DataFrame:
+    init_db()
+    with _connect() as conn:
+        return pd.read_sql_query(
+            """
+            SELECT u.id, u.username, u.email, u.full_name, u.role, u.active, u.created_at, u.updated_at,
+                   (SELECT COUNT(*) FROM user_project_access a WHERE a.user_id=u.id) AS project_count
+            FROM users u
+            ORDER BY CASE u.role WHEN 'admin' THEN 0 WHEN 'internal' THEN 1 ELSE 2 END, lower(u.username)
+            """,
+            conn,
+        )
+
+
+def create_user(username: str, email: str, full_name: str, role: str, password: str, project_ids: list[str] | None = None, active: bool = True) -> str:
+    init_db()
+    username = _normalize_username(username)
+    email = (email or "").strip().lower()
+    role = (role or "").strip().lower()
+    if not email or "@" not in email:
+        raise ValueError("Email user tidak valid.")
+    if role not in {"admin","internal","owner","consultant"}:
+        raise ValueError("Role user tidak valid.")
+    if len(password or "") < 8:
+        raise ValueError("Password minimal 8 karakter.")
+    now = datetime.now().isoformat(timespec="seconds")
+    user_id = uuid.uuid4().hex[:16]
+    with _connect() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO users(id,email,username,full_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (user_id, email, username, (full_name or "").strip(), role, _hash_password(password), int(bool(active)), now, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            message = str(exc).lower()
+            if "username" in message:
+                raise ValueError("Nama User sudah digunakan.") from exc
+            if "email" in message:
+                raise ValueError("Email sudah digunakan.") from exc
+            raise
+        if role in {"owner","consultant"}:
+            for pid in sorted(set(project_ids or [])):
+                conn.execute(
+                    "INSERT OR REPLACE INTO user_project_access(user_id,project_id,access_level,created_at) VALUES(?,?,?,?)",
+                    (user_id, pid, "view", now),
+                )
+        conn.execute(
+            "INSERT INTO audit_log(project_id,dataset_id,action,detail,created_at) VALUES(NULL,NULL,?,?,?)",
+            ("CREATE_USER", f"{username} | {role}", now),
+        )
+    return user_id
+
+
+def update_user(user_id: str, *, username: str | None = None, email: str | None = None, full_name: str | None = None, role: str | None = None, active: bool | None = None, password: str | None = None, project_ids: list[str] | None = None) -> None:
+    init_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise KeyError("User tidak ditemukan.")
+        current = dict(row)
+        new_role = (role or current["role"]).strip().lower()
+        if new_role not in {"admin","internal","owner","consultant"}:
+            raise ValueError("Role user tidak valid.")
+        new_username = current.get("username") if username is None else _normalize_username(username)
+        new_email = current.get("email") if email is None else (email or "").strip().lower()
+        if not new_email or "@" not in new_email:
+            raise ValueError("Email user tidak valid.")
+        updates = {
+            "username": new_username,
+            "email": new_email,
+            "full_name": current.get("full_name") if full_name is None else (full_name or "").strip(),
+            "role": new_role,
+            "active": int(current.get("active",1)) if active is None else int(bool(active)),
+            "updated_at": now,
+        }
+        if password:
+            if len(password) < 8:
+                raise ValueError("Password minimal 8 karakter.")
+            updates["password_hash"] = _hash_password(password)
+        sets = ", ".join(f"{quote_ident(k)}=?" for k in updates)
+        try:
+            conn.execute(f"UPDATE users SET {sets} WHERE id=?", list(updates.values()) + [user_id])
+        except sqlite3.IntegrityError as exc:
+            message = str(exc).lower()
+            if "username" in message:
+                raise ValueError("Nama User sudah digunakan.") from exc
+            if "email" in message:
+                raise ValueError("Email sudah digunakan.") from exc
+            raise
+        conn.execute("DELETE FROM user_project_access WHERE user_id=?", (user_id,))
+        if new_role in {"owner","consultant"}:
+            for pid in sorted(set(project_ids or [])):
+                conn.execute(
+                    "INSERT INTO user_project_access(user_id,project_id,access_level,created_at) VALUES(?,?,?,?)",
+                    (user_id, pid, "view", now),
+                )
+        conn.execute(
+            "INSERT INTO audit_log(project_id,dataset_id,action,detail,created_at) VALUES(NULL,NULL,?,?,?)",
+            ("UPDATE_USER", f"{new_username} | role={new_role} | active={updates['active']}", now),
+        )
+
+
+def user_project_ids(user_id: str) -> list[str]:
+    init_db()
+    with _connect() as conn:
+        return [r[0] for r in conn.execute("SELECT project_id FROM user_project_access WHERE user_id=? ORDER BY project_id", (user_id,)).fetchall()]
+
+
+def list_projects_for_user(user: dict[str, Any] | None) -> pd.DataFrame:
+    init_db()
+    if not user:
+        return pd.DataFrame()
+    role = str(user.get("role") or "").lower()
+    if role in {"admin","internal"}:
+        return list_projects()
+    with _connect() as conn:
+        return pd.read_sql_query(
+            """
+            SELECT p.*,
+                   (SELECT COUNT(DISTINCT COALESCE(NULLIF(ss.function_name,''), sf.function_name))
+                    FROM source_files sf LEFT JOIN source_sheets ss ON ss.source_file_id=sf.id AND ss.selected=1
+                    WHERE sf.project_id=p.id) AS function_count,
+                   (SELECT COUNT(*) FROM photos ph WHERE ph.project_id=p.id) AS photo_count
+            FROM projects p
+            JOIN user_project_access a ON a.project_id=p.id
+            WHERE a.user_id=?
+            ORDER BY p.updated_at DESC
+            """,
+            conn,
+            params=(user.get("id"),),
+        )
+
+
+def user_can_access_project(user: dict[str, Any] | None, project_id: str | None) -> bool:
+    if not user or not project_id:
+        return False
+    role = str(user.get("role") or "").lower()
+    if role in {"admin","internal"}:
+        return True
+    with _connect() as conn:
+        row = conn.execute("SELECT 1 FROM user_project_access WHERE user_id=? AND project_id=?", (user.get("id"), project_id)).fetchone()
+    return bool(row)
 
 def create_dataset(df: pd.DataFrame, project_id: str, function_name: str, name: str, source_type: str = "excel", source_ref: str = "", sheet_name: str = "") -> str:
     init_db()

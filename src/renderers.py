@@ -216,7 +216,7 @@ def _configure_daily_gantt_axis(fig, start=None, finish=None, *, row: int = 1, c
         side="top",
         ticks="outside",
         ticklen=5,
-        tickfont=dict(size=10, color="#111827"),
+        tickfont=dict(size=11, color="#111827"),
         showgrid=True,
         gridwidth=1,
         gridcolor="#d9dee7",
@@ -305,7 +305,7 @@ def render_lookahead(p: dict[str,Any], key: str="lookahead") -> None:
         # Cleaner two-zone layout: Activity | Calendar. Row type labels are removed.
         fig = make_subplots(
             rows=1, cols=2, shared_yaxes=True,
-            column_widths=[0.38, 0.62], horizontal_spacing=0.01,
+            column_widths=[0.31, 0.69], horizontal_spacing=0.008,
         )
         n = len(tasks)
         dates = []
@@ -314,10 +314,10 @@ def render_lookahead(p: dict[str,Any], key: str="lookahead") -> None:
         plan_color = "#16A34A"   # bright green
         actual_color = "#F97316" # bright orange
         for i, (_, r) in enumerate(tasks.iterrows()):
-            activity = _activity_label(r.get("No"), r.get("Pekerjaan"), 66)
-            base = (n - 1 - i) * 1.85
-            plan_y = base + 0.64
-            actual_y = base + 0.18
+            activity = _activity_label(r.get("No"), r.get("Pekerjaan"), 52)
+            base = (n - 1 - i) * 1.42
+            plan_y = base + 0.48
+            actual_y = base + 0.12
             group_y = (plan_y + actual_y) / 2
             ps = pd.to_datetime(r.get("RA Start"), errors="coerce")
             pf = pd.to_datetime(r.get("RA Finish"), errors="coerce")
@@ -325,7 +325,7 @@ def render_lookahead(p: dict[str,Any], key: str="lookahead") -> None:
             rf = pd.to_datetime(r.get("RI Finish"), errors="coerce")
             dates += [x for x in [ps,pf,rs,rf] if pd.notna(x)]
 
-            _add_text_annotation(fig, x=.015, y=group_y, text=activity, col=1, xanchor="left", size=10)
+            _add_text_annotation(fig, x=.012, y=group_y, text=activity, col=1, xanchor="left", size=12)
 
             _add_gantt_bar(
                 fig, plan_y, ps, pf, "Rencana", plan_color,
@@ -341,22 +341,22 @@ def render_lookahead(p: dict[str,Any], key: str="lookahead") -> None:
                 )
                 first_actual = False
             if i < n-1:
-                sep_y = base - 0.18
+                sep_y = base - 0.16
                 for cc in (1,2):
                     fig.add_hline(y=sep_y, line_width=1, line_dash="solid", line_color="#d7dde7", row=1, col=cc)
 
         if dates:
             _configure_daily_gantt_axis(fig, min(dates), max(dates), row=1, col=2, xref="x2")
-        ymax = n*1.85 + 0.95
+        ymax = n*1.42 + 0.76
         fig.update_xaxes(range=[0,1], visible=False, fixedrange=True, row=1, col=1)
         for cc in (1,2):
             fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, range=[-.35,ymax], fixedrange=True, row=1, col=cc)
 
         fig.add_annotation(x=.015, y=1.025, xref="x domain", yref="paper", text="<b>KEGIATAN</b>", showarrow=False,
-                           xanchor="left", font=dict(size=10, color="#475569"))
+                           xanchor="left", font=dict(size=12, color="#475569"))
         _lookahead_light_theme(fig)
         fig.update_layout(
-            height=max(620, min(2100, 50*n + 150)),
+            height=max(540, min(1850, 41*n + 135)),
             margin=dict(l=14, r=14, t=78, b=18),
             barmode="overlay", bargap=0, showlegend=True, hovermode="closest",
             legend=dict(orientation="h", yanchor="bottom", y=1.10, xanchor="right", x=1.0,
@@ -372,35 +372,35 @@ def render_lookahead(p: dict[str,Any], key: str="lookahead") -> None:
             st.dataframe(tasks[keep],use_container_width=True,hide_index=True,height=420)
     else:
         st.markdown("#### Gantt 2 Minggu ke Depan · Lookahead")
-        fig = make_subplots(rows=1, cols=2, shared_yaxes=True, column_widths=[0.40,0.60], horizontal_spacing=0.008)
+        fig = make_subplots(rows=1, cols=2, shared_yaxes=True, column_widths=[0.31,0.69], horizontal_spacing=0.008)
         n = len(tasks)
         dates = []
         for i, (_, r) in enumerate(tasks.iterrows()):
-            activity = _activity_label(r.get("No"), r.get("Pekerjaan"), 68)
-            y = (n - 1 - i) * 1.22
+            activity = _activity_label(r.get("No"), r.get("Pekerjaan"), 52)
+            y = (n - 1 - i) * 0.92
             ps = pd.to_datetime(r.get("RA Start"), errors="coerce")
             pf = pd.to_datetime(r.get("RA Finish"), errors="coerce")
             dates += [x for x in [ps,pf] if pd.notna(x)]
-            _add_text_annotation(fig, x=.015, y=y, text=activity, col=1, xanchor="left", size=10)
+            _add_text_annotation(fig, x=.012, y=y, text=activity, col=1, xanchor="left", size=12)
             _add_gantt_bar(
                 fig, y, ps, pf, "Rencana", "#16A34A",
                 f"<b>{activity.replace('<br>',' ')}</b><br>{ps.strftime('%d %b %Y') if pd.notna(ps) else '—'} → {pf.strftime('%d %b %Y') if pd.notna(pf) else '—'}",
                 False, col=2,
             )
             if i < n-1:
-                sep_y = y-.61
+                sep_y = y-.46
                 for cc in (1,2):
                     fig.add_hline(y=sep_y, line_width=1, line_dash="dot", line_color="#e5e7eb", row=1, col=cc)
         if dates:
             _configure_daily_gantt_axis(fig, min(dates), max(dates), row=1, col=2, xref="x2")
-        ymax=max(1,n*1.22)
+        ymax=max(1,n*0.92)
         fig.update_xaxes(range=[0,1], visible=False, fixedrange=True, row=1, col=1)
         for cc in (1,2):
             fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, range=[-.65,ymax], fixedrange=True, row=1, col=cc)
         fig.add_annotation(x=.015, y=1.025, xref="x domain", yref="paper", text="<b>KEGIATAN</b>", showarrow=False,
-                           xanchor="left", font=dict(size=10, color="#475569"))
+                           xanchor="left", font=dict(size=12, color="#475569"))
         _lookahead_light_theme(fig)
-        fig.update_layout(height=max(520,min(1900,48*n+120)),margin=dict(l=14,r=14,t=78,b=18),showlegend=False)
+        fig.update_layout(height=max(470,min(1600,34*n+120)),margin=dict(l=14,r=14,t=78,b=18),showlegend=False)
         st.plotly_chart(
             fig,use_container_width=True,key=f"{key}_forward_timeline",
             config=_gantt_config("gantt_2_minggu_ke_depan"),

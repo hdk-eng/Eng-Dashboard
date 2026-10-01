@@ -55,15 +55,15 @@ def normalize_logo_bytes(raw: bytes, canvas_size: tuple[int, int] = (300, 124)) 
 
     # Aspect-aware target box: same canvas, different bounds to equalize visual weight.
     if ratio >= 3.2:
-        max_w, max_h = 246, 66
+        max_w, max_h = 238, 50
     elif ratio >= 1.8:
-        max_w, max_h = 228, 76
+        max_w, max_h = 220, 58
     elif ratio >= 1.15:
-        max_w, max_h = 190, 86
+        max_w, max_h = 178, 68
     elif ratio >= 0.75:
-        max_w, max_h = 112, 94
+        max_w, max_h = 92, 72
     else:
-        max_w, max_h = 84, 98
+        max_w, max_h = 70, 76
 
     scale = min(max_w / w, max_h / h)
     new_size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))

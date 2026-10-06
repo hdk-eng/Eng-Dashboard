@@ -307,12 +307,14 @@ def init_db() -> None:
                 period_start TEXT,
                 period_end TEXT,
                 data_as_of TEXT NOT NULL,
+                period_date TEXT,
                 revision_no INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published')),
                 note TEXT,
                 created_by TEXT,
                 created_at TEXT NOT NULL,
                 published_at TEXT,
+                published_by TEXT,
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
                 UNIQUE(project_id, period_label, revision_no)
             );
@@ -375,6 +377,25 @@ def init_db() -> None:
             if current_username != candidate:
                 conn.execute("UPDATE users SET username=? WHERE id=?", (candidate, row["id"]))
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(username COLLATE NOCASE)")
+
+        # Migrasi v2.10.1: reset password aman dan tanggal periode laporan kanonik.
+        user_cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "must_change_password" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+        if "password_reset_at" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN password_reset_at TEXT")
+        if "password_reset_by" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN password_reset_by TEXT")
+
+        report_cols = {r[1] for r in conn.execute("PRAGMA table_info(reporting_periods)").fetchall()}
+        if "period_date" not in report_cols:
+            conn.execute("ALTER TABLE reporting_periods ADD COLUMN period_date TEXT")
+        if "published_by" not in report_cols:
+            conn.execute("ALTER TABLE reporting_periods ADD COLUMN published_by TEXT")
+        conn.execute(
+            "UPDATE reporting_periods SET period_date=data_as_of "
+            "WHERE COALESCE(period_date,'')='' AND COALESCE(data_as_of,'')<>''"
+        )
 
         # Migrasi v2.4: arsip file asli per versi untuk visual sheet/historical view.
         sf_cols = {r[1] for r in conn.execute("PRAGMA table_info(source_files)").fetchall()}
@@ -696,7 +717,9 @@ def list_users() -> pd.DataFrame:
     with _connect() as conn:
         return pd.read_sql_query(
             """
-            SELECT u.id, u.username, u.email, u.full_name, u.role, u.active, u.created_at, u.updated_at,
+            SELECT u.id, u.username, u.email, u.full_name, u.role, u.active,
+                   COALESCE(u.must_change_password,0) AS must_change_password,
+                   u.created_at, u.updated_at,
                    (SELECT COUNT(*) FROM user_project_access a WHERE a.user_id=u.id) AS project_count
             FROM users u
             ORDER BY CASE u.role WHEN 'admin' THEN 0 WHEN 'internal' THEN 1 ELSE 2 END, lower(u.username)
@@ -832,13 +855,42 @@ def change_own_password(user_id: str, current_password: str, new_password: str) 
         if not row or not _verify_password(current_password or "", row["password_hash"] or ""):
             raise ValueError("Password saat ini tidak sesuai.")
         conn.execute(
-            "UPDATE users SET password_hash=?, updated_at=? WHERE id=?",
+            "UPDATE users SET password_hash=?, must_change_password=0, updated_at=? WHERE id=?",
             (_hash_password(new_password), now, user_id),
         )
         conn.execute(
             "INSERT INTO audit_log(project_id,dataset_id,action,detail,created_at) VALUES(NULL,NULL,?,?,?)",
             ("CHANGE_OWN_PASSWORD", str(row["username"] or user_id), now),
         )
+
+
+def admin_reset_password(user_id: str, actor: str = "local-admin") -> str:
+    """Reset a non-admin user's password and return a one-time temporary password.
+
+    The plaintext temporary password is never stored in SQLite or the audit log.
+    """
+    init_db()
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    temporary_password = "".join(secrets.choice(alphabet) for _ in range(12))
+    now = datetime.now().isoformat(timespec="seconds")
+    with _connect() as conn:
+        row = conn.execute("SELECT username,role FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise KeyError("User tidak ditemukan.")
+        if str(row["role"] or "").lower() == "admin":
+            raise ValueError("Password Admin Lokal tidak direset dari menu User & Akses.")
+        conn.execute(
+            """UPDATE users
+               SET password_hash=?, must_change_password=1, password_reset_at=?,
+                   password_reset_by=?, updated_at=?
+               WHERE id=?""",
+            (_hash_password(temporary_password), now, (actor or "local-admin").strip(), now, user_id),
+        )
+        conn.execute(
+            "INSERT INTO audit_log(project_id,dataset_id,action,detail,created_at) VALUES(NULL,NULL,?,?,?)",
+            ("ADMIN_RESET_PASSWORD", f"{row['username']}; by={actor or 'local-admin'}", now),
+        )
+    return temporary_password
 
 
 def create_reporting_period(
@@ -851,7 +903,10 @@ def create_reporting_period(
     note: str = "",
     created_by: str = "",
 ) -> str:
-    """Create a draft reporting revision. Reusing a label creates the next revision."""
+    """Create a draft reporting revision for the user-selected reporting date.
+
+    Upload/creation time is audit metadata only; it never defines the reporting period.
+    """
     init_db()
     label = (period_label or "").strip()
     as_of = (data_as_of or "").strip()
@@ -863,15 +918,17 @@ def create_reporting_period(
     report_id = uuid.uuid4().hex[:12]
     with _connect() as conn:
         row = conn.execute(
-            "SELECT COALESCE(MAX(revision_no), -1) + 1 FROM reporting_periods WHERE project_id=? AND period_label=?",
-            (project_id, label),
+            """SELECT COALESCE(MAX(revision_no), -1) + 1
+               FROM reporting_periods
+               WHERE project_id=? AND (COALESCE(period_date,data_as_of)=? OR period_label=?)""",
+            (project_id, as_of, label),
         ).fetchone()
         revision_no = int(row[0] or 0)
         conn.execute(
             """INSERT INTO reporting_periods(
-                id,project_id,period_label,period_start,period_end,data_as_of,revision_no,status,note,created_by,created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (report_id, project_id, label, period_start or "", period_end or "", as_of, revision_no, "draft",
+                id,project_id,period_label,period_start,period_end,data_as_of,period_date,revision_no,status,note,created_by,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (report_id, project_id, label, period_start or "", period_end or "", as_of, as_of, revision_no, "draft",
              (note or "").strip(), (created_by or "").strip(), now),
         )
         _audit(conn, project_id, None, "CREATE_REPORTING_REVISION", f"{label}; rev={revision_no}; as_of={as_of}")
@@ -883,28 +940,32 @@ def list_reporting_periods(project_id: str) -> pd.DataFrame:
     with _connect() as conn:
         return pd.read_sql_query(
             """SELECT * FROM reporting_periods WHERE project_id=?
-               ORDER BY data_as_of DESC, period_label DESC, revision_no DESC""",
+               ORDER BY COALESCE(period_date,data_as_of) DESC, revision_no DESC, created_at DESC""",
             conn, params=(project_id,),
         )
 
 
 def publish_reporting_period(report_id: str, published_by: str = "") -> None:
-    """Publish one revision and return older published revisions of the same label to draft history."""
+    """Publish one immutable official revision.
+
+    Older Published revisions remain Published history. The current revision for a
+    reporting date is the Published row with the highest revision number.
+    """
     init_db()
     now = datetime.now().isoformat(timespec="seconds")
     with _connect() as conn:
         row = conn.execute("SELECT * FROM reporting_periods WHERE id=?", (report_id,)).fetchone()
         if not row:
             raise KeyError("Periode laporan tidak ditemukan.")
+        if str(row["status"] or "").lower() == "published":
+            return
         conn.execute(
-            """UPDATE reporting_periods SET status='draft'
-               WHERE project_id=? AND period_label=? AND id<>? AND status='published'""",
-            (row["project_id"], row["period_label"], report_id),
+            "UPDATE reporting_periods SET status='published', published_at=?, published_by=? WHERE id=?",
+            (now, (published_by or "").strip(), report_id),
         )
-        conn.execute("UPDATE reporting_periods SET status='published', published_at=? WHERE id=?", (now, report_id))
         _audit(
             conn, row["project_id"], None, "PUBLISH_REPORTING_REVISION",
-            f"{row['period_label']}; rev={row['revision_no']}; by={published_by or '-'}",
+            f"{row['period_label']}; period={row['data_as_of']}; rev={row['revision_no']}; by={published_by or '-'}",
         )
 
 

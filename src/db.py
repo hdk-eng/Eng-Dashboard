@@ -451,6 +451,7 @@ def create_project(
     project_manager: str = "", site_manager: str = "", contract_value: float | None = None,
     contract_vat_status: str = "Belum termasuk PPN", report_period: str = "", bim_revision: str = "", contractor_name: str = "", consultant_planner_name: str = "", consultant_name: str = "",
     logo_contractor_path: str = "", logo_owner_path: str = "", logo_consultant_planner_path: str = "", logo_consultant_path: str = "",
+    project_status: str = "Aktif",
 ) -> str:
     init_db()
     project_id = uuid.uuid4().hex[:12]
@@ -462,14 +463,14 @@ def create_project(
                 id, code, name, client, location, description, bimx_url, contract_no, contract_start,
                 contract_finish, revised_finish, project_manager, site_manager, contract_value, contract_vat_status,
                 report_period, bim_revision, contractor_name, consultant_planner_name, consultant_name, logo_contractor_path,
-                logo_owner_path, logo_consultant_planner_path, logo_consultant_path, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                logo_owner_path, logo_consultant_planner_path, logo_consultant_path, project_status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (project_id, code.strip(), name.strip(), client.strip(), location.strip(), description.strip(), bimx_url.strip(),
              contract_no.strip(), contract_start.strip(), contract_finish.strip(), revised_finish.strip(),
              project_manager.strip(), site_manager.strip(), contract_value, contract_vat_status.strip(), report_period.strip(), bim_revision.strip(),
              contractor_name.strip(), consultant_planner_name.strip(), consultant_name.strip(), logo_contractor_path.strip(), logo_owner_path.strip(),
-             logo_consultant_planner_path.strip(), logo_consultant_path.strip(), now, now),
+             logo_consultant_planner_path.strip(), logo_consultant_path.strip(), (project_status or "Aktif").strip(), now, now),
         )
         _audit(conn, project_id, None, "CREATE_PROJECT", f"{code} - {name}")
     return project_id

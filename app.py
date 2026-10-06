@@ -1414,6 +1414,7 @@ elif page == "Master Proyek":
             with l4: logo_contractor = st.file_uploader("Logo Kontraktor", type=["png","jpg","jpeg","webp"], key="create_logo_contractor")
             bimx = st.text_input("Link BIMx", placeholder="https://...")
             desc = st.text_area("Deskripsi")
+            project_status = st.selectbox("Status Proyek", reporting.STATUS_OPTIONS, index=0)
             submit = st.form_submit_button("Buat proyek", use_container_width=True)
         if submit:
             if not code.strip() or not name.strip():
@@ -1427,6 +1428,7 @@ elif page == "Master Proyek":
                         contract_finish=_date_iso(contract_finish), revised_finish=_date_iso(revised_finish),
                         contract_value=contract_value, contract_vat_status=contract_vat_status,
                         contractor_name=contractor_name, consultant_planner_name=planner_name, consultant_name=consultant_name,
+                        project_status=project_status,
                     )
                     logo_updates={}
                     if logo_owner is not None: logo_updates["logo_owner_path"] = save_project_logo(new_id, logo_owner, "owner")

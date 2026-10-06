@@ -1,4 +1,17 @@
-# HDK Project Data Hub v2.9.20
+# HDK Project Data Hub v2.10
+
+## v2.10 — Reporting & Portfolio
+
+- Menambahkan **Konsolidasi Proyek** untuk Admin/Internal HDK: status, owner, lokasi, tanggal mulai, Effective Finish, jumlah fungsi, dan visual.
+- Master Proyek memiliki **Status Proyek**: Aktif, On Hold, Selesai, atau Terminasi.
+- **Effective Finish** memakai Revised Finish bila tersedia, jika tidak memakai Finish Contract.
+- Menambahkan **Periode Laporan** dengan workflow Draft → Published dan revision history per periode.
+- Menambahkan export **PDF laporan proyek** serta tombol membuat draft email laporan.
+- Menambahkan **Profil Saya** agar user non-admin dapat memperbarui nama/email dan mengganti password sendiri dengan verifikasi password lama.
+- Semua perubahan database memakai migrasi additive/backward-compatible; data proyek, user, Excel, foto/BIM, dan histori lama tidak dihapus.
+- Dependency baru: `fpdf2` untuk PDF report.
+
+> Catatan logo HDK: source repo saat ini tidak memiliki asset logo HDK resmi yang dapat diverifikasi. Karena logo perusahaan bersifat krusial, v2.10 tidak membuat/mengarang logo pengganti. Asset resmi dapat ditambahkan setelah file logo resmi tersedia.
 
 ## WIP → Publish → Web
 

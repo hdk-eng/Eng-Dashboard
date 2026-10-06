@@ -14,6 +14,7 @@ import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pandas as pd
 import plotly.express as px
@@ -36,7 +37,7 @@ from src.visuals import (
 )
 from src.renderers import render_payload, render_executive, render_engineering_dashboard, render_lookahead
 from src.assets import normalize_logo_bytes, normalized_logo_data_uri
-from src import publish, storage
+from src import publish, storage, reporting
 
 APP_DIR = Path(__file__).resolve().parent
 # Normal lokal: DB berada di <app>/data. Web Preview: LOCAL_DB_PATH menunjuk ke
@@ -842,11 +843,16 @@ access_mode = app_access_mode(current_user)
 project_id = sidebar_project_selector(current_user)
 logout_button(current_user)
 if access_mode == "viewer":
-    nav_options = ["Dashboard Proyek", "Visual Sheet"]
+    if str(current_user.get("role") or "").lower() == "internal":
+        nav_options = ["Konsolidasi Proyek", "Dashboard Proyek", "Visual Sheet", "Profil Saya"]
+    else:
+        nav_options = ["Dashboard Proyek", "Visual Sheet", "Profil Saya"]
 else:
     nav_options = [
+        "Konsolidasi Proyek",
         "Dashboard Proyek",
         "Visual Sheet",
+        "Periode Laporan",
         "Update Data",
         "Foto & BIM Update",
         "Quick Edit Data",
@@ -855,6 +861,7 @@ else:
         "User & Akses",
         "Publish & Sync",
         "Riwayat & Database",
+        "Profil Saya",
     ]
 page = st.sidebar.radio("Navigasi", nav_options)
 st.sidebar.markdown("---")
@@ -867,8 +874,172 @@ render_flash()
 active_project = render_active_project_context(project_id, access_mode, current_user)
 
 
+# ------------------------------ Profile / Portfolio / Reporting ------------------------------
+if page == "Profil Saya":
+    st.markdown(hero("Profil Saya", "Perbarui identitas akun dan password Anda tanpa mengubah role atau akses proyek."), unsafe_allow_html=True)
+    if current_user.get("id") == "__local_admin__":
+        st.info("Admin Lokal memakai PIN khusus localhost. Profil user tidak berlaku untuk akun recovery lokal ini.")
+        st.caption("Untuk mengganti PIN Admin Lokal, gunakan RESET_LOCAL_ADMIN_PIN.bat lalu buat PIN baru saat login.")
+    else:
+        fresh_user = db.get_user(str(current_user.get("id"))) or current_user
+        p1, p2 = st.columns([1, 1])
+        with p1:
+            with st.form("self_profile_form"):
+                st.text_input("Nama User", value=fresh_user.get("username") or "", disabled=True)
+                own_name = st.text_input("Nama lengkap", value=fresh_user.get("full_name") or "")
+                own_email = st.text_input("Email", value=fresh_user.get("email") or "")
+                save_profile = st.form_submit_button("Simpan Profil", type="primary", use_container_width=True)
+            if save_profile:
+                try:
+                    db.update_own_profile(str(fresh_user["id"]), full_name=own_name, email=own_email)
+                    flash("success", "Profil berhasil diperbarui.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Profil tidak dapat disimpan: {exc}")
+        with p2:
+            with st.form("self_password_form"):
+                current_pwd = st.text_input("Password saat ini", type="password")
+                new_pwd = st.text_input("Password baru", type="password", help="Minimal 8 karakter.")
+                new_pwd2 = st.text_input("Ulangi password baru", type="password")
+                save_pwd = st.form_submit_button("Ganti Password", use_container_width=True)
+            if save_pwd:
+                if new_pwd != new_pwd2:
+                    st.error("Konfirmasi password baru tidak sama.")
+                else:
+                    try:
+                        db.change_own_password(str(fresh_user["id"]), current_pwd, new_pwd)
+                        flash("success", "Password berhasil diganti.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Password tidak dapat diganti: {exc}")
+
+elif page == "Konsolidasi Proyek":
+    role = str(current_user.get("role") or "").lower()
+    if role not in {"admin", "internal"}:
+        st.error("Konsolidasi Proyek hanya tersedia untuk Admin dan Internal HDK.")
+        st.stop()
+    st.markdown(hero("Konsolidasi Proyek", "Ringkasan seluruh proyek yang dapat Anda akses dalam satu tampilan manajemen."), unsafe_allow_html=True)
+    portfolio_projects = db.list_projects_for_user(current_user)
+    portfolio = reporting.portfolio_frame(portfolio_projects)
+    if portfolio.empty:
+        st.info("Belum ada proyek.")
+    else:
+        today_ts = pd.Timestamp(date.today())
+        finish_ts = pd.to_datetime(portfolio["Effective Finish"], errors="coerce")
+        active_count = int(portfolio["Status"].astype(str).str.lower().eq("aktif").sum())
+        due_90 = int(((finish_ts >= today_ts) & (finish_ts <= today_ts + pd.Timedelta(days=90))).sum())
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total Proyek", len(portfolio))
+        k2.metric("Aktif", active_count)
+        k3.metric("Finish ≤ 90 hari", due_90)
+        k4.metric("Total Foto / Visual", int(pd.to_numeric(portfolio["Foto"], errors="coerce").fillna(0).sum()))
+        status_filter = st.multiselect(
+            "Filter status",
+            sorted(portfolio["Status"].dropna().astype(str).unique().tolist()),
+            default=[],
+            key="portfolio_status_filter",
+        )
+        view = portfolio[portfolio["Status"].isin(status_filter)].copy() if status_filter else portfolio
+        st.dataframe(view, use_container_width=True, hide_index=True, height=520)
+        st.caption("Effective Finish = Revised Finish bila tersedia; jika tidak, memakai Finish Contract.")
+
+elif page == "Periode Laporan":
+    if access_mode != "admin":
+        st.error("Periode Laporan hanya dapat dikelola oleh Admin HDK.")
+        st.stop()
+    if not project_id:
+        st.info("Pilih proyek terlebih dahulu.")
+        st.stop()
+    project = db.get_project(project_id)
+    st.markdown(hero("Periode Laporan", "Buat Draft, terbitkan Published, dan pertahankan histori revisi laporan proyek."), unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("### Buat Draft / Revisi")
+        with st.form("create_reporting_period"):
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                report_label = st.text_input("Nama periode *", value=date.today().strftime("%B %Y"))
+            with r2:
+                report_start = st.date_input("Awal periode", value=None, format="DD/MM/YYYY")
+            with r3:
+                report_end = st.date_input("Akhir periode", value=date.today(), format="DD/MM/YYYY")
+            data_as_of = st.date_input("Data per tanggal *", value=date.today(), format="DD/MM/YYYY")
+            report_note = st.text_area("Catatan revisi", placeholder="Contoh: Update progress minggu ke-38 dan status engineering.")
+            create_report = st.form_submit_button("Simpan sebagai Draft", type="primary", use_container_width=True)
+        if create_report:
+            try:
+                db.create_reporting_period(
+                    project_id, report_label, data_as_of.isoformat(),
+                    period_start=_date_iso(report_start), period_end=_date_iso(report_end),
+                    note=report_note, created_by=str(current_user.get("username") or current_user.get("id") or ""),
+                )
+                flash("success", "Draft periode laporan tersimpan. Jika nama periode sama, sistem otomatis membuat revisi berikutnya.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Draft tidak dapat disimpan: {exc}")
+
+    reports = db.list_reporting_periods(project_id)
+    if reports.empty:
+        st.info("Belum ada periode laporan.")
+    else:
+        st.markdown("### Histori Revisi")
+        show = reports[["id","period_label","revision_no","data_as_of","status","note","created_at","published_at"]].copy()
+        show["status"] = show["status"].astype(str).str.upper()
+        show.columns = ["ID","Periode","Rev","Data per tanggal","Status","Catatan","Dibuat","Dipublikasikan"]
+        st.dataframe(show, use_container_width=True, hide_index=True)
+        report_ids = reports["id"].tolist()
+        report_map = reports.set_index("id").to_dict("index")
+        selected_report_id = st.selectbox(
+            "Pilih revisi",
+            report_ids,
+            format_func=lambda rid: f"{report_map[rid]['period_label']} · Rev {report_map[rid]['revision_no']} · {str(report_map[rid]['status']).upper()}",
+            key="reporting_revision_select",
+        )
+        selected_report = report_map[selected_report_id]
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            if st.button(
+                "Publish Revisi Ini",
+                type="primary",
+                use_container_width=True,
+                disabled=str(selected_report.get("status")) == "published",
+                key="publish_reporting_revision",
+            ):
+                try:
+                    db.publish_reporting_period(selected_report_id, str(current_user.get("username") or "local-admin"))
+                    flash("success", "Revisi laporan resmi berhasil dipublikasikan.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Revisi tidak dapat dipublikasikan: {exc}")
+        datasets_now = db.list_project_datasets(project_id)
+        photo_count_now = db.photo_count(project_id)
+        pdf_bytes = reporting.build_project_report_pdf(
+            project, selected_report, dataset_count=len(datasets_now), photo_count=photo_count_now,
+        )
+        safe_code = re.sub(r"[^A-Za-z0-9_-]+", "_", str(project.get("code") or "project"))
+        safe_period = re.sub(r"[^A-Za-z0-9_-]+", "_", str(selected_report.get("period_label") or "report"))
+        with a2:
+            st.download_button(
+                "Download PDF",
+                data=pdf_bytes,
+                file_name=f"{safe_code}_{safe_period}_Rev{selected_report.get('revision_no',0)}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        with a3:
+            subject = f"HDK Project Report - {project.get('code','')} - {selected_report.get('period_label','')}"
+            body = (
+                f"Project: {project.get('code','')} - {project.get('name','')}\n"
+                f"Periode: {selected_report.get('period_label','')} Rev {selected_report.get('revision_no',0)}\n"
+                f"Data per tanggal: {selected_report.get('data_as_of','')}\n\n"
+                "PDF dapat diunduh dari HDK Project Data Hub lalu dilampirkan pada email ini."
+            )
+            mailto = f"mailto:?subject={quote(subject)}&body={quote(body)}"
+            st.link_button("Buat Email Laporan", mailto, use_container_width=True)
+        st.caption("Published menandai revisi resmi untuk periode tersebut. Revisi lama tetap tersimpan sebagai histori dan tidak dihapus.")
+
+
 # ------------------------------ User & Project Access ------------------------------
-if page == "User & Akses":
+elif page == "User & Akses":
     if access_mode != "admin":
         st.error("User & Akses hanya tersedia untuk Admin HDK.")
         st.stop()
@@ -1243,6 +1414,7 @@ elif page == "Master Proyek":
             with l4: logo_contractor = st.file_uploader("Logo Kontraktor", type=["png","jpg","jpeg","webp"], key="create_logo_contractor")
             bimx = st.text_input("Link BIMx", placeholder="https://...")
             desc = st.text_area("Deskripsi")
+            project_status = st.selectbox("Status Proyek", reporting.STATUS_OPTIONS, index=0)
             submit = st.form_submit_button("Buat proyek", use_container_width=True)
         if submit:
             if not code.strip() or not name.strip():
@@ -1256,6 +1428,7 @@ elif page == "Master Proyek":
                         contract_finish=_date_iso(contract_finish), revised_finish=_date_iso(revised_finish),
                         contract_value=contract_value, contract_vat_status=contract_vat_status,
                         contractor_name=contractor_name, consultant_planner_name=planner_name, consultant_name=consultant_name,
+                        project_status=project_status,
                     )
                     logo_updates={}
                     if logo_owner is not None: logo_updates["logo_owner_path"] = save_project_logo(new_id, logo_owner, "owner")
@@ -1298,6 +1471,12 @@ elif page == "Master Proyek":
                     e_consultant=st.text_input("Konsultan Pengawas", value=p.get("consultant_name") or "")
                     e_contractor=st.text_input("Kontraktor", value=p.get("contractor_name") or "")
                 e_desc = st.text_area("Deskripsi", value=p.get("description") or "")
+                current_project_status = p.get("project_status") or "Aktif"
+                e_project_status = st.selectbox(
+                    "Status Proyek",
+                    reporting.STATUS_OPTIONS,
+                    index=reporting.STATUS_OPTIONS.index(current_project_status) if current_project_status in reporting.STATUS_OPTIONS else 0,
+                )
             with t2:
                 c1,c2=st.columns(2)
                 with c1:
@@ -1363,7 +1542,8 @@ elif page == "Master Proyek":
                         project_id, code=e_code, name=e_name, client=e_owner, location=e_location,
                         bimx_url=e_bimx, description=e_desc, contract_no=e_contract_no,
                         contract_start=_date_iso(e_start), contract_finish=_date_iso(e_finish), revised_finish=_date_iso(e_revised),
-                        contract_value=e_value, contract_vat_status=e_vat, contractor_name=e_contractor, consultant_planner_name=e_planner, consultant_name=e_consultant, **logo_updates,
+                        contract_value=e_value, contract_vat_status=e_vat, contractor_name=e_contractor, consultant_planner_name=e_planner, consultant_name=e_consultant,
+                        project_status=e_project_status, **logo_updates,
                     )
                     flash("success", "Master proyek dan logo diperbarui tanpa mengubah Internal Project ID.")
                     st.rerun()

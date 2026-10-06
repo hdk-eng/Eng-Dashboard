@@ -5,3 +5,4 @@ xlrd>=2.0,<3
 plotly>=5.20,<7
 pillow>=10,<13
 numpy>=1.26,<3
+fpdf2>=2.8,<3

@@ -1,0 +1,30 @@
+# HDK runtime/project data - never commit
+data/
+web_preview/
+web_published/
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Python environments/cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Secrets
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Local output
+.pytest_cache/
+.ruff_cache/
+coverage.xml
+htmlcov/
+dist/
+build/
+dashboard_startup.log

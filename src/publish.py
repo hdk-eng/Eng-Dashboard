@@ -17,8 +17,8 @@ try:
 except ImportError:  # pragma: no cover - CLI fallback
     import storage  # type: ignore
 
-PUBLISH_SCHEMA_VERSION = 1
-APP_VERSION = "2.9.19"
+PUBLISH_SCHEMA_VERSION = 2
+APP_VERSION = "2.10.1"
 
 CORE_TABLES = {
     "projects",
@@ -33,6 +33,7 @@ CORE_TABLES = {
     "audit_log",
     "users",
     "user_project_access",
+    "reporting_periods",
 }
 
 PROJECT_SCOPED_TABLES = [
@@ -46,6 +47,7 @@ PROJECT_SCOPED_TABLES = [
     "datasets",
     "audit_log",
     "user_project_access",
+    "reporting_periods",
 ]
 
 PATH_COLUMNS = {
@@ -215,6 +217,7 @@ def project_summary(db_path: Path, project_id: str) -> dict[str, Any]:
             "snapshots": int(_query_scalar(conn, "SELECT COUNT(*) FROM data_snapshots WHERE project_id=?", [project_id])),
             "access_users": int(_query_scalar(conn, "SELECT COUNT(*) FROM user_project_access WHERE project_id=?", [project_id])),
             "active_internal_users": int(_query_scalar(conn, "SELECT COUNT(*) FROM users WHERE active=1 AND role='internal'")),
+            "reporting_revisions": int(_query_scalar(conn, "SELECT COUNT(*) FROM reporting_periods WHERE project_id=?", [project_id])),
         }
         timestamps: list[str] = []
         for sql in [
@@ -293,6 +296,7 @@ def project_fingerprint(db_path: Path, data_dir: Path, project_id: str) -> str:
             ("SELECT * FROM data_snapshots WHERE project_id=? ORDER BY id", [project_id]),
             ("SELECT * FROM photos WHERE project_id=? ORDER BY id", [project_id]),
             ("SELECT * FROM user_project_access WHERE project_id=? ORDER BY user_id", [project_id]),
+            ("SELECT * FROM reporting_periods WHERE project_id=? ORDER BY data_as_of, revision_no", [project_id]),
             ("SELECT id,username,email,full_name,role,active,updated_at FROM users WHERE role<>'admin' ORDER BY id", []),
         ]
         referenced_paths: set[str] = set()
@@ -871,7 +875,7 @@ def _merge_bundle_db(source_db: Path, target_db: Path, first: bool) -> None:
     with _connect(source_db) as src, _connect(target_db) as dst:
         dst.execute("PRAGMA foreign_keys=OFF")
         # Core tables. Users are global; project-specific records have stable IDs.
-        for table in ["users", "projects", "datasets", "function_sources", "import_batches", "photos", "source_files", "source_versions", "source_sheets", "data_snapshots", "user_project_access"]:
+        for table in ["users", "projects", "datasets", "function_sources", "import_batches", "photos", "source_files", "source_versions", "source_sheets", "data_snapshots", "user_project_access", "reporting_periods"]:
             _copy_table_all(src, dst, table, replace=True)
         # Audit log has integer IDs. Same local source uses globally unique IDs, so replace is fine.
         _copy_table_all(src, dst, "audit_log", replace=True)

@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-title HDK Project Data Hub v2.9.19 Launcher
+title HDK Project Data Hub v2.10.1 Launcher
 
  echo ============================================================
- echo   HDK PROJECT DATA HUB v2.9.19
+ echo   HDK PROJECT DATA HUB v2.10.1
  echo   Excel multi-fungsi ^| Foto Lapangan ^| BIMx ^| SQLite
  echo ============================================================
  echo.
@@ -35,7 +35,7 @@ if defined LOCALAPPDATA (
 )
 set "VENV_DIR=%HDK_ENV_ROOT%\venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
-set "DEPS_MARKER=%VENV_DIR%\.deps_ready_v2916"
+set "DEPS_MARKER=%VENV_DIR%\.deps_ready_v2101"
 
 if not exist "%VENV_PY%" (
     echo.

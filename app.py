@@ -839,6 +839,34 @@ def dataset_selector(project_id: str, key: str, label: str = "Dataset") -> str |
 
 # ------------------------------ Login / Sidebar ------------------------------
 current_user = require_login()
+
+# Password hasil Reset Admin hanya berlaku sementara. User wajib menggantinya
+# sebelum dapat membuka data proyek.
+if current_user.get("id") != "__local_admin__" and int(current_user.get("must_change_password") or 0) == 1:
+    st.markdown(hero("Ganti Password", "Password sementara harus diganti sebelum melanjutkan ke aplikasi."), unsafe_allow_html=True)
+    fc1, fc2, fc3 = st.columns([1, 1.35, 1])
+    with fc2:
+        with st.container(border=True):
+            with st.form("forced_password_change"):
+                temp_pwd = st.text_input("Password sementara", type="password")
+                forced_new = st.text_input("Password baru", type="password", help="Minimal 8 karakter.")
+                forced_new2 = st.text_input("Ulangi password baru", type="password")
+                forced_submit = st.form_submit_button("Simpan Password Baru", type="primary", use_container_width=True)
+            if forced_submit:
+                if forced_new != forced_new2:
+                    st.error("Konfirmasi password baru tidak sama.")
+                else:
+                    try:
+                        db.change_own_password(str(current_user["id"]), temp_pwd, forced_new)
+                        st.success("Password berhasil diganti. Membuka aplikasi...")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Password tidak dapat diganti: {exc}")
+            if st.button("Keluar", use_container_width=True, key="forced_password_logout"):
+                st.session_state.pop("auth_user_id", None)
+                st.rerun()
+    st.stop()
+
 access_mode = app_access_mode(current_user)
 project_id = sidebar_project_selector(current_user)
 logout_button(current_user)
@@ -962,7 +990,7 @@ elif page == "Periode Laporan":
                 report_start = st.date_input("Awal periode", value=None, format="DD/MM/YYYY")
             with r3:
                 report_end = st.date_input("Akhir periode", value=date.today(), format="DD/MM/YYYY")
-            data_as_of = st.date_input("Data per tanggal *", value=date.today(), format="DD/MM/YYYY")
+            data_as_of = st.date_input("Tanggal periode laporan *", value=date.today(), format="DD/MM/YYYY", help="Tanggal ini menentukan periode data. Waktu upload hanya dicatat sebagai audit, bukan sebagai periode.")
             report_note = st.text_area("Catatan revisi", placeholder="Contoh: Update progress minggu ke-38 dan status engineering.")
             create_report = st.form_submit_button("Simpan sebagai Draft", type="primary", use_container_width=True)
         if create_report:
@@ -972,7 +1000,7 @@ elif page == "Periode Laporan":
                     period_start=_date_iso(report_start), period_end=_date_iso(report_end),
                     note=report_note, created_by=str(current_user.get("username") or current_user.get("id") or ""),
                 )
-                flash("success", "Draft periode laporan tersimpan. Jika nama periode sama, sistem otomatis membuat revisi berikutnya.")
+                flash("success", "Draft periode laporan tersimpan. Jika tanggal periode yang sama diperbarui, sistem membuat revisi berikutnya tanpa menghapus revisi lama.")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Draft tidak dapat disimpan: {exc}")
@@ -984,7 +1012,7 @@ elif page == "Periode Laporan":
         st.markdown("### Histori Revisi")
         show = reports[["id","period_label","revision_no","data_as_of","status","note","created_at","published_at"]].copy()
         show["status"] = show["status"].astype(str).str.upper()
-        show.columns = ["ID","Periode","Rev","Data per tanggal","Status","Catatan","Dibuat","Dipublikasikan"]
+        show.columns = ["ID","Periode","Rev","Tanggal Periode","Status","Catatan","Dibuat","Dipublikasikan"]
         st.dataframe(show, use_container_width=True, hide_index=True)
         report_ids = reports["id"].tolist()
         report_map = reports.set_index("id").to_dict("index")
@@ -1030,12 +1058,12 @@ elif page == "Periode Laporan":
             body = (
                 f"Project: {project.get('code','')} - {project.get('name','')}\n"
                 f"Periode: {selected_report.get('period_label','')} Rev {selected_report.get('revision_no',0)}\n"
-                f"Data per tanggal: {selected_report.get('data_as_of','')}\n\n"
+                f"Tanggal periode: {selected_report.get('data_as_of','')}\n\n"
                 "PDF dapat diunduh dari HDK Project Data Hub lalu dilampirkan pada email ini."
             )
             mailto = f"mailto:?subject={quote(subject)}&body={quote(body)}"
             st.link_button("Buat Email Laporan", mailto, use_container_width=True)
-        st.caption("Published menandai revisi resmi untuk periode tersebut. Revisi lama tetap tersimpan sebagai histori dan tidak dihapus.")
+        st.caption("Published bersifat histori resmi dan tidak ditimpa. Untuk tanggal periode yang sama, revisi Published dengan nomor tertinggi adalah revisi terkini.")
 
 
 # ------------------------------ User & Project Access ------------------------------
@@ -1087,8 +1115,10 @@ elif page == "User & Akses":
             show_users = users_df.copy()
             show_users["role"] = show_users["role"].map(ROLE_LABELS).fillna(show_users["role"])
             show_users["active"] = show_users["active"].map({1: "Aktif", 0: "Nonaktif"})
+            if "must_change_password" in show_users.columns:
+                show_users["Status Password"] = show_users["must_change_password"].map({1: "Wajib diganti", 0: "Normal"}).fillna("Normal")
             show_users = show_users.rename(columns={"username":"Nama User","email":"Email","full_name":"Nama Lengkap","role":"Role","active":"Status","project_count":"Jumlah Proyek"})
-            st.dataframe(show_users[[c for c in ["Nama User","Nama Lengkap","Email","Role","Status","Jumlah Proyek"] if c in show_users.columns]], use_container_width=True, hide_index=True)
+            st.dataframe(show_users[[c for c in ["Nama User","Nama Lengkap","Email","Role","Status","Status Password","Jumlah Proyek"] if c in show_users.columns]], use_container_width=True, hide_index=True)
 
     users_df = db.list_users()
     if not users_df.empty:
@@ -1117,7 +1147,7 @@ elif page == "User & Akses":
                 e_role = st.selectbox("Role", role_options, index=role_options.index(current_role) if current_role in role_options else 1,
                                       format_func=lambda x: ROLE_LABELS[x], key=f"rbac_role_{selected_uid}")
             e_active = st.checkbox("User aktif", value=bool(selected_user.get("active")), key=f"rbac_active_{selected_uid}", disabled=(current_role == "admin"))
-            reset_password = st.text_input("Password baru (opsional)", type="password", key=f"rbac_pwd_{selected_uid}", help="Kosongkan jika tidak ingin mengganti password.")
+            st.caption("Password saat ini tidak pernah dapat dilihat oleh Admin. Gunakan Reset Password untuk membuat password sementara.")
         with e2:
             if e_role in {"owner", "consultant"}:
                 e_projects = st.multiselect("Proyek yang dapat dilihat", project_ids_all, default=[x for x in existing_projects if x in project_ids_all],
@@ -1132,11 +1162,26 @@ elif page == "User & Akses":
         if st.button("Simpan User & Akses", type="primary", use_container_width=True, disabled=save_disabled, key=f"save_rbac_{selected_uid}"):
             try:
                 db.update_user(selected_uid, username=e_username, email=e_email, full_name=e_name, role=e_role, active=e_active,
-                               password=reset_password or None, project_ids=e_projects)
+                               project_ids=e_projects)
                 flash("success", "User dan akses proyek berhasil diperbarui.")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Gagal memperbarui user: {exc}")
+
+        if current_role != "admin":
+            st.markdown("#### Reset Password")
+            st.caption("Membuat password sementara baru. Password lama tidak dapat dilihat dan tidak disimpan dalam bentuk teks.")
+            if st.button("Reset Password User", use_container_width=True, key=f"reset_rbac_password_{selected_uid}"):
+                try:
+                    temporary_password = db.admin_reset_password(
+                        selected_uid,
+                        actor=str(current_user.get("username") or current_user.get("id") or "local-admin"),
+                    )
+                    st.success("Password sementara berhasil dibuat. Salin sekarang; setelah halaman berubah password ini tidak ditampilkan lagi.")
+                    st.code(temporary_password, language=None)
+                    st.caption("User wajib mengganti password sementara tersebut saat login berikutnya.")
+                except Exception as exc:
+                    st.error(f"Password tidak dapat direset: {exc}")
 
 
 # ------------------------------ Publish & Sync ------------------------------
